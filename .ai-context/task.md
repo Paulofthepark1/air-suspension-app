@@ -1,0 +1,5 @@
+- `[x]` Initialize Frontend project (Raw HTML/JS/CSS used due to environment constraints).
+- `[x]` Develop the frontend UI mirroring the provided design.
+- `[x]` Implement Web Bluetooth logic in `app.js`.
+- `[x]` Write the ESP32 C++ target code with specified relay pins and BLE logic.
+- `[x]` Final verification and Walkthrough.
