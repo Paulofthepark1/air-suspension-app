@@ -12,13 +12,14 @@ body, html {
   font-family: 'Roboto', sans-serif;
   background-color: #121212; /* Dark Mode */
   color: #fff;
-  overflow: hidden;
+  overflow-x: hidden;
 }
 
 .app-container {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  min-height: 100vh;
+  min-height: 100dvh;
   justify-content: space-between;
   padding: 20px;
 }

@@ -182,8 +182,8 @@ ui.btnStart.addEventListener('click', async () => {
     await cmdCharacteristic.writeValue(encoder.encode(cmdStr));
     
     // Add visual feedback to button
-    ui.btnStart.innerText = "EXECUTED";
-    setTimeout(() => { ui.btnStart.innerText = "EXECUTE"; }, 2000);
+    ui.btnStart.innerText = "APPLIED";
+    setTimeout(() => { ui.btnStart.innerText = "APPLY TARGETS"; }, 2000);
   } catch(e) {
     console.error("Write error", e);
   }
