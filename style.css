@@ -35,7 +35,7 @@ body, html {
 
 .controls-container {
   display: flex;
-  justify-content: space-between;
+  justify-content: space-around;
   align-items: center;
   flex: 1;
   max-width: 500px;
@@ -47,14 +47,27 @@ body, html {
   display: flex;
   flex-direction: column;
   align-items: center;
-  width: 25%;
+  width: 45%;
 }
 
-.center-control {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 40%;
+.sync-btn {
+  background: #333;
+  color: #888;
+  border: 2px solid #555;
+  border-radius: 20px;
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  font-weight: bold;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.sync-btn.active {
+  background: #007aff;
+  color: #fff;
+  border-color: #007aff;
+  box-shadow: 0 0 8px rgba(0, 122, 255, 0.5);
 }
 
 .arrow-btn {

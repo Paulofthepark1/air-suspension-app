@@ -22,6 +22,7 @@ const ui = {
   status: document.getElementById('ble-status'),
   btnConnect: document.getElementById('btn-connect'),
   btnStart: document.getElementById('btn-start'),
+  btnSync: document.getElementById('btn-sync'),
   
   targetLeft: document.getElementById('target-left'),
   targetRight: document.getElementById('target-right'),
@@ -113,17 +114,36 @@ function handleRightPsi(event) {
 }
 
 // -- TARGET CONTROLS LOGIC --
+let isSyncOn = false;
+
+ui.btnSync.addEventListener('click', () => {
+  isSyncOn = !isSyncOn;
+  ui.btnSync.innerText = isSyncOn ? "SYNC: ON" : "SYNC: OFF";
+  ui.btnSync.classList.toggle('active', isSyncOn);
+  
+  if (isSyncOn) {
+    // When sync turns on, match right to left by default
+    targetRight = targetLeft;
+    updateDisplay();
+  }
+});
+
 function updateDisplay() {
   ui.targetLeft.innerText = targetLeft;
   ui.targetRight.innerText = targetRight;
 }
 
 function adjustTarget(side, amount) {
-  if (side === 'left' || side === 'both') {
+  if (isSyncOn) {
     targetLeft = Math.max(0, Math.min(150, targetLeft + amount));
-  }
-  if (side === 'right' || side === 'both') {
-    targetRight = Math.max(0, Math.min(150, targetRight + amount));
+    targetRight = targetLeft; 
+  } else {
+    if (side === 'left') {
+      targetLeft = Math.max(0, Math.min(150, targetLeft + amount));
+    }
+    if (side === 'right') {
+      targetRight = Math.max(0, Math.min(150, targetRight + amount));
+    }
   }
   updateDisplay();
 }
@@ -133,9 +153,7 @@ const btnMap = {
   'btn-left-up': { side: 'left', amt: 5 },
   'btn-left-down': { side: 'left', amt: -5 },
   'btn-right-up': { side: 'right', amt: 5 },
-  'btn-right-down': { side: 'right', amt: -5 },
-  'btn-both-up': { side: 'both', amt: 5 },
-  'btn-both-down': { side: 'both', amt: -5 }
+  'btn-right-down': { side: 'right', amt: -5 }
 };
 
 Object.keys(btnMap).forEach(id => {
