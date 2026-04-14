@@ -126,15 +126,33 @@ unsigned long lastControlUpdate = 0;
 void loop() {
   if (deviceConnected) {
     
-    // --- 1. SENSOR NOTIFICATION (Simulated) ---
-    if (millis() - lastSensorUpdate > 1000) {
+    // --- 1. SENSOR READING & NOTIFICATION ---
+    if (millis() - lastSensorUpdate > 500) {
       lastSensorUpdate = millis();
 
-      char lStr[10]; sprintf(lStr, "%d", leftPsi);
+      // LEFT SENSOR on Pin 34 (ADC1)
+      int rawAdc = analogRead(SENSOR_PIN);
+      float voltage = rawAdc * (3.3 / 4095.0);
+
+      char lStr[10];
+      // If voltage is below 0.15V, sensor is probably not connected
+      if (voltage < 0.15) {
+        sprintf(lStr, "---");
+        leftPsi = -1; // flag as disconnected
+      } else {
+        // Clamp to valid sensor range
+        if (voltage < 0.34) voltage = 0.34;
+        if (voltage > 3.09) voltage = 3.09;
+        // Map 0.34V-3.09V to 0-150 PSI (10k/22k divider)
+        leftPsi = (int)((voltage - 0.34) * (150.0 / (3.09 - 0.34)));
+        sprintf(lStr, "%d", leftPsi);
+      }
       pCharLeft->setValue((uint8_t*)lStr, strlen(lStr));
       pCharLeft->notify();
 
-      char rStr[10]; sprintf(rStr, "%d", rightPsi);
+      // RIGHT SENSOR - No sensor wired yet, send dashes
+      const char* rStr = "---";
+      rightPsi = -1;
       pCharRight->setValue((uint8_t*)rStr, strlen(rStr));
       pCharRight->notify();
     }
