@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Air Suspension</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <div class="header">
+      <span id="ble-status">No Device Selected</span>
+    </div>
+
+    <div class="controls-container">
+      <!-- LEFT CONTROLS -->
+      <div class="side-control">
+        <button class="arrow-btn" id="btn-left-up">
+          <svg viewBox="0 0 24 24"><path d="M12 2L22 20H2Z" fill="currentColor"/></svg>
+        </button>
+        <div class="psi-display">
+          <div class="psi-target">
+             <span class="psi-value target" id="target-left">0</span>
+             <span class="psi-label">TGT</span>
+          </div>
+          <div class="psi-current">
+             <span class="psi-value" id="val-left">---</span>
+             <span class="psi-label">PSI</span>
+          </div>
+        </div>
+        <button class="arrow-btn btn-down" id="btn-left-down">
+          <svg viewBox="0 0 24 24"><path d="M12 22L2 4H22Z" fill="currentColor"/></svg>
+        </button>
+      </div>
+
+      <!-- CENTER (BOTH) CONTROLS -->
+      <div class="center-control">
+        <button class="arrow-btn large" id="btn-both-up">
+          <svg viewBox="0 0 24 24"><path d="M12 2L22 20H2Z" fill="currentColor"/></svg>
+        </button>
+        <div class="spacer"></div>
+        <button class="arrow-btn large btn-down" id="btn-both-down">
+          <svg viewBox="0 0 24 24"><path d="M12 22L2 4H22Z" fill="currentColor"/></svg>
+        </button>
+      </div>
+
+      <!-- RIGHT CONTROLS -->
+      <div class="side-control">
+        <button class="arrow-btn" id="btn-right-up">
+          <svg viewBox="0 0 24 24"><path d="M12 2L22 20H2Z" fill="currentColor"/></svg>
+        </button>
+        <div class="psi-display">
+          <div class="psi-target">
+             <span class="psi-value target" id="target-right">0</span>
+             <span class="psi-label">TGT</span>
+          </div>
+          <div class="psi-current">
+             <span class="psi-value" id="val-right">---</span>
+             <span class="psi-label">PSI</span>
+          </div>
+        </div>
+        <button class="arrow-btn btn-down" id="btn-right-down">
+          <svg viewBox="0 0 24 24"><path d="M12 22L2 4H22Z" fill="currentColor"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- ACTION START BUTTON -->
+    <div class="action-container">
+       <button class="start-btn pulse-glow disabled" id="btn-start">EXECUTE</button>
+    </div>
+
+    <div class="footer">
+      <button class="connect-btn" id="btn-connect">CONNECT</button>
+      <div class="footer-info">
+        <div class="status-title">Air System Status</div>
+        <div class="status-detail">Left: <span id="foot-left">---</span> &nbsp; Right: <span id="foot-right">---</span></div>
+      </div>
+      <button class="gear-btn" id="btn-settings">
+        <svg viewBox="0 0 24 24" width="32" height="32"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22l-1.92 3.32c-.12.21-.07.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .43-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

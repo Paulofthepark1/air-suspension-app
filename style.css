@@ -1,0 +1,240 @@
+* {
+  box-sizing: border-box;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+body, html {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: 'Roboto', sans-serif;
+  background-color: #121212; /* Dark Mode */
+  color: #fff;
+  overflow: hidden;
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  justify-content: space-between;
+  padding: 20px;
+}
+
+.header {
+  text-align: center;
+  font-size: 1rem;
+  font-weight: 500;
+  color: #888;
+  padding-top: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.controls-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex: 1;
+  max-width: 500px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.side-control {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 25%;
+}
+
+.center-control {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 40%;
+}
+
+.arrow-btn {
+  background: transparent;
+  border: none;
+  color: #ff3b30;
+  cursor: pointer;
+  padding: 0;
+  outline: none;
+  transition: transform 0.1s, opacity 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.arrow-btn:active, .arrow-btn.active {
+  transform: scale(0.9);
+  color: #d32f2f;
+}
+
+.arrow-btn svg {
+  width: 90px;
+  height: 90px;
+  filter: drop-shadow(0px 4px 6px rgba(0,0,0,0.5));
+}
+
+.arrow-btn.large svg {
+  width: 130px;
+  height: 130px;
+}
+
+.psi-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100px;
+  margin: 10px 0;
+}
+
+.psi-target {
+  color: #ff3b30;
+  text-align: center;
+  margin-bottom: 5px;
+}
+
+.psi-target .psi-value {
+  font-size: 2.8rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.psi-target .psi-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #ff3b30;
+  opacity: 0.8;
+  display: block;
+}
+
+.psi-current {
+  color: #888;
+  text-align: center;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.psi-current .psi-value {
+  font-size: 1.4rem;
+  font-weight: 500;
+}
+
+.psi-current .psi-label {
+  font-size: 0.7rem;
+}
+
+.spacer {
+  height: 100px;
+}
+
+.action-container {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.start-btn {
+  background: linear-gradient(135deg, #34c759, #28a745);
+  border: none;
+  border-radius: 30px;
+  color: white;
+  padding: 15px 40px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 2px;
+  box-shadow: 0 4px 15px rgba(52, 199, 89, 0.4);
+  cursor: pointer;
+  transition: transform 0.1s, background 0.3s, box-shadow 0.3s;
+}
+
+.start-btn:active {
+  transform: scale(0.95);
+  box-shadow: 0 2px 8px rgba(52, 199, 89, 0.3);
+}
+
+.start-btn.disabled {
+  background: #333;
+  color: #666;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.pulse-glow {
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.7); }
+  70% { box-shadow: 0 0 0 15px rgba(52, 199, 89, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
+}
+
+.start-btn.disabled.pulse-glow {
+  animation: none;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 0;
+  border-top: 1px solid #333;
+}
+
+.connect-btn {
+  padding: 12px 24px;
+  border-radius: 30px;
+  background-color: #333;
+  color: #fff;
+  font-weight: bold;
+  letter-spacing: 1px;
+  border: 2px solid #555;
+  cursor: pointer;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  transition: background-color 0.3s, border-color 0.3s;
+}
+
+.connect-btn.connected {
+  background-color: #007aff;
+  border-color: #007aff;
+  box-shadow: 0 0 8px rgba(0, 122, 255, 0.5);
+}
+
+.footer-info {
+  flex: 1;
+  margin-left: 15px;
+}
+
+.status-title {
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: #fff;
+}
+
+.status-detail {
+  font-size: 0.9rem;
+  color: #888;
+  margin-top: 4px;
+}
+
+.gear-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  padding: 10px;
+  transition: color 0.3s;
+}
+
+.gear-btn:active {
+  color: #fff;
+}
