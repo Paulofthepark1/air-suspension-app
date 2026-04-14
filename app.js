@@ -16,6 +16,8 @@ let cmdCharacteristic = null;
 // Target state
 let targetLeft = 0;
 let targetRight = 0;
+let appliedLeft = 0;
+let appliedRight = 0;
 let targetsInitialized = false;
 
 const ui = {
@@ -95,7 +97,8 @@ function handleLeftPsi(event) {
   ui.footLeft.innerText = value;
   
   if (!targetsInitialized) {
-    targetLeft = parseInt(value, 10);
+    appliedLeft = parseInt(value, 10);
+    targetLeft = appliedLeft;
     updateDisplay();
   }
 }
@@ -107,7 +110,8 @@ function handleRightPsi(event) {
   ui.footRight.innerText = value;
 
   if (!targetsInitialized) {
-    targetRight = parseInt(value, 10);
+    appliedRight = parseInt(value, 10);
+    targetRight = appliedRight;
     targetsInitialized = true; // Wait until right also triggers
     updateDisplay();
   }
@@ -131,6 +135,24 @@ ui.btnSync.addEventListener('click', () => {
 function updateDisplay() {
   ui.targetLeft.innerText = targetLeft;
   ui.targetRight.innerText = targetRight;
+
+  if (targetLeft === appliedLeft) {
+    ui.targetLeft.classList.remove('modified');
+  } else {
+    ui.targetLeft.classList.add('modified');
+  }
+
+  if (targetRight === appliedRight) {
+    ui.targetRight.classList.remove('modified');
+  } else {
+    ui.targetRight.classList.add('modified');
+  }
+
+  if (targetLeft === appliedLeft && targetRight === appliedRight) {
+    ui.btnStart.classList.remove('modified');
+  } else {
+    ui.btnStart.classList.add('modified');
+  }
 }
 
 function adjustTarget(side, amount) {
@@ -181,9 +203,14 @@ ui.btnStart.addEventListener('click', async () => {
     const encoder = new TextEncoder('utf-8');
     await cmdCharacteristic.writeValue(encoder.encode(cmdStr));
     
+    // Re-sync applied targets
+    appliedLeft = targetLeft;
+    appliedRight = targetRight;
+    updateDisplay();
+    
     // Add visual feedback to button
-    ui.btnStart.innerText = "APPLIED";
-    setTimeout(() => { ui.btnStart.innerText = "APPLY TARGETS"; }, 2000);
+    ui.btnStart.innerText = "DONE!";
+    setTimeout(() => { ui.btnStart.innerText = "SET"; }, 1500);
   } catch(e) {
     console.error("Write error", e);
   }

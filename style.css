@@ -110,7 +110,7 @@ body, html {
 }
 
 .psi-target {
-  color: #ff3b30;
+  color: #34c759;
   text-align: center;
   margin-bottom: 5px;
 }
@@ -119,12 +119,16 @@ body, html {
   font-size: 2.8rem;
   font-weight: 700;
   letter-spacing: 1px;
+  color: #34c759;
+}
+
+.psi-target .psi-value.modified {
+  color: #ff3b30;
 }
 
 .psi-target .psi-label {
   font-size: 0.8rem;
   font-weight: 700;
-  color: #ff3b30;
   opacity: 0.8;
   display: block;
 }
@@ -170,9 +174,19 @@ body, html {
   transition: transform 0.1s, background 0.3s, box-shadow 0.3s;
 }
 
+.start-btn.modified {
+  background: linear-gradient(135deg, #ff3b30, #d32f2f);
+  box-shadow: 0 4px 15px rgba(255, 59, 48, 0.4);
+  animation: pulseRed 2s infinite;
+}
+
 .start-btn:active {
   transform: scale(0.95);
   box-shadow: 0 2px 8px rgba(52, 199, 89, 0.3);
+}
+
+.start-btn.modified:active {
+  box-shadow: 0 2px 8px rgba(255, 59, 48, 0.3);
 }
 
 .start-btn.disabled {
@@ -180,20 +194,13 @@ body, html {
   color: #666;
   box-shadow: none;
   cursor: not-allowed;
-}
-
-.pulse-glow {
-  animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-  0% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.7); }
-  70% { box-shadow: 0 0 0 15px rgba(52, 199, 89, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
-}
-
-.start-btn.disabled.pulse-glow {
   animation: none;
+}
+
+@keyframes pulseRed {
+  0% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.7); }
+  70% { box-shadow: 0 0 0 15px rgba(255, 59, 48, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0); }
 }
 
 .footer {
