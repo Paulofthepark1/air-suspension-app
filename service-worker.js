@@ -1,4 +1,4 @@
-const CACHE_NAME = 'air-suspension-cache-v1';
+const CACHE_NAME = 'air-suspension-cache-v2';
 const urlsToCache = [
   './',
   './index.html',
