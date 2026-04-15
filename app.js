@@ -69,7 +69,7 @@ async function autoReconnect() {
   try {
     const devices = await navigator.bluetooth.getDevices();
     // Find a previously paired ESP32
-    const esp32 = devices.find(d => d.name && d.name.startsWith('ESP32'));
+    const esp32 = devices.find(d => d.name && d.name === 'Air Bags');
     
     if (!esp32) {
       console.log('No previously paired ESP32 found.');
@@ -139,7 +139,7 @@ ui.btnConnect.addEventListener('click', async () => {
   try {
     ui.status.innerText = 'Requesting Bluetooth Device...';
     const device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: 'ESP32' }, { services: [SERVICE_UUID] }],
+      filters: [{ name: 'Air Bags' }, { services: [SERVICE_UUID] }],
       optionalServices: [SERVICE_UUID]
     });
 

@@ -105,7 +105,7 @@ void setup() {
 
   stopAllSolenoids();
 
-  BLEDevice::init("ESP32_Air_Suspension");
+  BLEDevice::init("Air Bags");
 
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
