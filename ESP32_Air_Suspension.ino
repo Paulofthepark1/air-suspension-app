@@ -31,6 +31,10 @@ const int RIGHT_AIR_IN_PIN = 18;
 const int RIGHT_AIR_OUT_PIN = 19; 
 const int SENSOR_PIN = 34; // Simulation analog pin
 
+// Relay logic - Blue relay boards are typically Active-LOW
+#define RELAY_ON LOW
+#define RELAY_OFF HIGH
+
 // Service and Characteristics
 #define SERVICE_UUID           "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHAR_LEFT_PSI_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26a8"
@@ -38,10 +42,10 @@ const int SENSOR_PIN = 34; // Simulation analog pin
 #define CHAR_CMD_UUID          "beb5483e-36e3-4688-b7f5-ea07361b26a8"
 
 void stopAllSolenoids() {
-  digitalWrite(LEFT_AIR_IN_PIN, LOW);
-  digitalWrite(LEFT_AIR_OUT_PIN, LOW);
-  digitalWrite(RIGHT_AIR_IN_PIN, LOW);
-  digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
+  digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+  digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+  digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+  digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
 }
 
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -85,6 +89,12 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
 
 void setup() {
   Serial.begin(115200);
+
+  // Set pins to OFF state before making them outputs to avoid relay chatter
+  digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+  digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+  digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+  digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
 
   // Initialize Pins
   pinMode(LEFT_AIR_IN_PIN, OUTPUT);
@@ -175,37 +185,37 @@ void loop() {
       // LEFT SIDE LOGIC (only if sensor is connected)
       if (leftPsi >= 0) {
         if (leftPsi < targetLeftPsi - HYSTERESIS) {
-          digitalWrite(LEFT_AIR_IN_PIN, HIGH);
-          digitalWrite(LEFT_AIR_OUT_PIN, LOW);
+          digitalWrite(LEFT_AIR_IN_PIN, RELAY_ON);
+          digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
         } else if (leftPsi > targetLeftPsi + HYSTERESIS) {
-          digitalWrite(LEFT_AIR_IN_PIN, LOW);
-          digitalWrite(LEFT_AIR_OUT_PIN, HIGH);
+          digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+          digitalWrite(LEFT_AIR_OUT_PIN, RELAY_ON);
         } else {
-          digitalWrite(LEFT_AIR_IN_PIN, LOW);
-          digitalWrite(LEFT_AIR_OUT_PIN, LOW);
+          digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+          digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
         }
       } else {
         // No sensor - ensure solenoids are off
-        digitalWrite(LEFT_AIR_IN_PIN, LOW);
-        digitalWrite(LEFT_AIR_OUT_PIN, LOW);
+        digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+        digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
       }
 
       // RIGHT SIDE LOGIC (only if sensor is connected)
       if (rightPsi >= 0) {
         if (rightPsi < targetRightPsi - HYSTERESIS) {
-          digitalWrite(RIGHT_AIR_IN_PIN, HIGH);
-          digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
+          digitalWrite(RIGHT_AIR_IN_PIN, RELAY_ON);
+          digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
         } else if (rightPsi > targetRightPsi + HYSTERESIS) {
-          digitalWrite(RIGHT_AIR_IN_PIN, LOW);
-          digitalWrite(RIGHT_AIR_OUT_PIN, HIGH);
+          digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+          digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_ON);
         } else {
-          digitalWrite(RIGHT_AIR_IN_PIN, LOW);
-          digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
+          digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+          digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
         }
       } else {
         // No sensor - ensure solenoids are off
-        digitalWrite(RIGHT_AIR_IN_PIN, LOW);
-        digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
+        digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+        digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
       }
     }
   }
