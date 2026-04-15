@@ -18,7 +18,6 @@ let targetLeft = 0;
 let targetRight = 0;
 let appliedLeft = 0;
 let appliedRight = 0;
-let targetsInitialized = false;
 
 const ui = {
   status: document.getElementById('ble-status'),
@@ -86,51 +85,25 @@ function onDisconnected() {
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
   cmdCharacteristic = null;
-  targetsInitialized = false;
-  leftSensorReady = false;
-  rightSensorReady = false;
+  // Reset targets to 0 for next session
+  targetLeft = 0;
+  targetRight = 0;
+  appliedLeft = 0;
+  appliedRight = 0;
+  updateDisplay();
 }
 
 // -- SENSOR HANDLING --
-let leftSensorReady = false;
-let rightSensorReady = false;
-
 function handleLeftPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valLeft.innerText = value;
-  
-  const parsed = parseInt(value, 10);
-  if (!isNaN(parsed) && !leftSensorReady) {
-    // First valid numeric reading — initialize targets from sensor
-    appliedLeft = parsed;
-    targetLeft = appliedLeft;
-    leftSensorReady = true;
-    checkTargetsInitialized();
-    updateDisplay();
-  }
 }
 
 function handleRightPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valRight.innerText = value;
-
-  const parsed = parseInt(value, 10);
-  if (!isNaN(parsed) && !rightSensorReady) {
-    // First valid numeric reading — initialize targets from sensor
-    appliedRight = parsed;
-    targetRight = appliedRight;
-    rightSensorReady = true;
-    checkTargetsInitialized();
-    updateDisplay();
-  }
-}
-
-function checkTargetsInitialized() {
-  // Consider targets initialized once we've received at least one notification
-  // from each side (even if one or both are "---")
-  targetsInitialized = true;
 }
 
 // -- TARGET CONTROLS LOGIC --

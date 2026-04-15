@@ -22,6 +22,7 @@ int targetLeftPsi = 0;
 int targetRightPsi = 0;
 
 const int HYSTERESIS = 2; // +/- 2 PSI tolerance to prevent rapid valve clicking
+bool commandReceived = false; // Solenoids stay off until user sends SET
 
 // ---- PIN DEFINITIONS ----
 const int LEFT_AIR_IN_PIN  = 4;  
@@ -49,10 +50,10 @@ class MyServerCallbacks: public BLEServerCallbacks {
     };
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
+      commandReceived = false; // Stop control loop
       stopAllSolenoids(); // Safety stop on disconnect
-      // Reset targets to current so it doesn't move when reconnected
-      targetLeftPsi = leftPsi;
-      targetRightPsi = rightPsi;
+      targetLeftPsi = 0;
+      targetRightPsi = 0;
     }
 };
 
@@ -71,8 +72,9 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
 
           targetLeftPsi = leftStr.toInt();
           targetRightPsi = rightStr.toInt();
+          commandReceived = true; // NOW activate the control loop
           
-          Serial.print("New target targets - Left: ");
+          Serial.print("New targets - Left: ");
           Serial.print(targetLeftPsi);
           Serial.print(" Right: ");
           Serial.println(targetRightPsi);
@@ -157,8 +159,8 @@ void loop() {
       pCharRight->notify();
     }
 
-    // --- 2. CONTROL LOOP (50ms interval) ---
-    if (millis() - lastControlUpdate > 50) {
+    // --- 2. CONTROL LOOP (50ms interval) - ONLY after user sends SET ---
+    if (commandReceived && millis() - lastControlUpdate > 50) {
       lastControlUpdate = millis();
 
       // LEFT SIDE LOGIC (only if sensor is connected)
