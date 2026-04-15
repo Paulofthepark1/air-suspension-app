@@ -203,12 +203,10 @@ body, html {
   100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0); }
 }
 
-.footer {
+.connect-container {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 20px 0;
-  border-top: 1px solid #333;
+  justify-content: center;
+  padding-bottom: 30px;
 }
 
 .connect-btn {
@@ -221,41 +219,11 @@ body, html {
   border: 2px solid #555;
   cursor: pointer;
   box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-  transition: background-color 0.3s, border-color 0.3s;
+  transition: background-color 0.3s, border-color 0.3s, color 0.3s;
 }
 
 .connect-btn.connected {
-  background-color: #007aff;
-  border-color: #007aff;
-  box-shadow: 0 0 8px rgba(0, 122, 255, 0.5);
-}
-
-.footer-info {
-  flex: 1;
-  margin-left: 15px;
-}
-
-.status-title {
-  font-size: 1.1rem;
-  font-weight: 500;
-  color: #fff;
-}
-
-.status-detail {
-  font-size: 0.9rem;
-  color: #888;
-  margin-top: 4px;
-}
-
-.gear-btn {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: #888;
-  padding: 10px;
-  transition: color 0.3s;
-}
-
-.gear-btn:active {
-  color: #fff;
+  background-color: rgba(255, 59, 48, 0.15);
+  border-color: #ff3b30;
+  color: #ff3b30;
 }

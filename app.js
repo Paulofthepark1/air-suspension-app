@@ -29,9 +29,7 @@ const ui = {
   targetLeft: document.getElementById('target-left'),
   targetRight: document.getElementById('target-right'),
   valLeft: document.getElementById('val-left'),
-  valRight: document.getElementById('val-right'),
-  footLeft: document.getElementById('foot-left'),
-  footRight: document.getElementById('foot-right')
+  valRight: document.getElementById('val-right')
 };
 
 // -- BLUETOOTH CONNECTION --
@@ -78,12 +76,14 @@ ui.btnConnect.addEventListener('click', async () => {
 function onConnected() {
   ui.status.innerText = 'Connected';
   ui.btnConnect.classList.add('connected');
+  ui.btnConnect.innerText = 'DISCONNECT';
   ui.btnStart.classList.remove('disabled');
 }
 
 function onDisconnected() {
   ui.status.innerText = 'No Device Selected';
   ui.btnConnect.classList.remove('connected');
+  ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
   cmdCharacteristic = null;
   targetsInitialized = false;
@@ -99,7 +99,6 @@ function handleLeftPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valLeft.innerText = value;
-  ui.footLeft.innerText = value;
   
   const parsed = parseInt(value, 10);
   if (!isNaN(parsed) && !leftSensorReady) {
@@ -116,7 +115,6 @@ function handleRightPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valRight.innerText = value;
-  ui.footRight.innerText = value;
 
   const parsed = parseInt(value, 10);
   if (!isNaN(parsed) && !rightSensorReady) {
