@@ -15,11 +15,11 @@ BLECharacteristic* pCharCmd = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
-// State Tracking
-int leftPsi = 65;
-int rightPsi = 65;
-int targetLeftPsi = 65;
-int targetRightPsi = 65;
+// State Tracking (-1 means no sensor / no reading)
+int leftPsi = -1;
+int rightPsi = -1;
+int targetLeftPsi = 0;
+int targetRightPsi = 0;
 
 const int HYSTERESIS = 2; // +/- 2 PSI tolerance to prevent rapid valve clicking
 
@@ -161,37 +161,41 @@ void loop() {
     if (millis() - lastControlUpdate > 50) {
       lastControlUpdate = millis();
 
-      // LEFT SIDE LOGIC
-      if (leftPsi < targetLeftPsi - HYSTERESIS) {
-        digitalWrite(LEFT_AIR_IN_PIN, HIGH);
-        digitalWrite(LEFT_AIR_OUT_PIN, LOW);
-      } else if (leftPsi > targetLeftPsi + HYSTERESIS) {
-        digitalWrite(LEFT_AIR_IN_PIN, LOW);
-        digitalWrite(LEFT_AIR_OUT_PIN, HIGH);
+      // LEFT SIDE LOGIC (only if sensor is connected)
+      if (leftPsi >= 0) {
+        if (leftPsi < targetLeftPsi - HYSTERESIS) {
+          digitalWrite(LEFT_AIR_IN_PIN, HIGH);
+          digitalWrite(LEFT_AIR_OUT_PIN, LOW);
+        } else if (leftPsi > targetLeftPsi + HYSTERESIS) {
+          digitalWrite(LEFT_AIR_IN_PIN, LOW);
+          digitalWrite(LEFT_AIR_OUT_PIN, HIGH);
+        } else {
+          digitalWrite(LEFT_AIR_IN_PIN, LOW);
+          digitalWrite(LEFT_AIR_OUT_PIN, LOW);
+        }
       } else {
+        // No sensor - ensure solenoids are off
         digitalWrite(LEFT_AIR_IN_PIN, LOW);
         digitalWrite(LEFT_AIR_OUT_PIN, LOW);
       }
 
-      // RIGHT SIDE LOGIC
-      if (rightPsi < targetRightPsi - HYSTERESIS) {
-        digitalWrite(RIGHT_AIR_IN_PIN, HIGH);
-        digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
-      } else if (rightPsi > targetRightPsi + HYSTERESIS) {
-        digitalWrite(RIGHT_AIR_IN_PIN, LOW);
-        digitalWrite(RIGHT_AIR_OUT_PIN, HIGH);
+      // RIGHT SIDE LOGIC (only if sensor is connected)
+      if (rightPsi >= 0) {
+        if (rightPsi < targetRightPsi - HYSTERESIS) {
+          digitalWrite(RIGHT_AIR_IN_PIN, HIGH);
+          digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
+        } else if (rightPsi > targetRightPsi + HYSTERESIS) {
+          digitalWrite(RIGHT_AIR_IN_PIN, LOW);
+          digitalWrite(RIGHT_AIR_OUT_PIN, HIGH);
+        } else {
+          digitalWrite(RIGHT_AIR_IN_PIN, LOW);
+          digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
+        }
       } else {
+        // No sensor - ensure solenoids are off
         digitalWrite(RIGHT_AIR_IN_PIN, LOW);
         digitalWrite(RIGHT_AIR_OUT_PIN, LOW);
       }
-
-      // -- SIMULATION DRIFT --
-      // This fakes the pressure changing so you can see it working without real sensors right now!
-      if (leftPsi < targetLeftPsi - HYSTERESIS) leftPsi++;
-      else if (leftPsi > targetLeftPsi + HYSTERESIS) leftPsi--;
-      
-      if (rightPsi < targetRightPsi - HYSTERESIS) rightPsi++;
-      else if (rightPsi > targetRightPsi + HYSTERESIS) rightPsi--;
     }
   }
 
@@ -205,8 +209,8 @@ void loop() {
   
   if (deviceConnected && !oldDeviceConnected) {
       oldDeviceConnected = deviceConnected;
-      // Initialize targets to current pressure when newly connected
-      targetLeftPsi = leftPsi;
-      targetRightPsi = rightPsi;
+      // Initialize targets to 0 when newly connected
+      targetLeftPsi = 0;
+      targetRightPsi = 0;
   }
 }

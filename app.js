@@ -87,18 +87,27 @@ function onDisconnected() {
   ui.btnStart.classList.add('disabled');
   cmdCharacteristic = null;
   targetsInitialized = false;
+  leftSensorReady = false;
+  rightSensorReady = false;
 }
 
 // -- SENSOR HANDLING --
+let leftSensorReady = false;
+let rightSensorReady = false;
+
 function handleLeftPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valLeft.innerText = value;
   ui.footLeft.innerText = value;
   
-  if (!targetsInitialized) {
-    appliedLeft = parseInt(value, 10);
+  const parsed = parseInt(value, 10);
+  if (!isNaN(parsed) && !leftSensorReady) {
+    // First valid numeric reading — initialize targets from sensor
+    appliedLeft = parsed;
     targetLeft = appliedLeft;
+    leftSensorReady = true;
+    checkTargetsInitialized();
     updateDisplay();
   }
 }
@@ -109,12 +118,21 @@ function handleRightPsi(event) {
   ui.valRight.innerText = value;
   ui.footRight.innerText = value;
 
-  if (!targetsInitialized) {
-    appliedRight = parseInt(value, 10);
+  const parsed = parseInt(value, 10);
+  if (!isNaN(parsed) && !rightSensorReady) {
+    // First valid numeric reading — initialize targets from sensor
+    appliedRight = parsed;
     targetRight = appliedRight;
-    targetsInitialized = true; // Wait until right also triggers
+    rightSensorReady = true;
+    checkTargetsInitialized();
     updateDisplay();
   }
+}
+
+function checkTargetsInitialized() {
+  // Consider targets initialized once we've received at least one notification
+  // from each side (even if one or both are "---")
+  targetsInitialized = true;
 }
 
 // -- TARGET CONTROLS LOGIC --
