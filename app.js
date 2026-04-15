@@ -12,6 +12,7 @@ const CHAR_CMD_UUID = "beb5483e-36e3-4688-b7f5-ea07361b26a8";
 
 let bleDevice = null;
 let cmdCharacteristic = null;
+let isAutoReconnecting = false;
 
 // Target state
 let targetLeft = 0;
@@ -31,8 +32,105 @@ const ui = {
   valRight: document.getElementById('val-right')
 };
 
-// -- BLUETOOTH CONNECTION --
+// -- SHARED CONNECTION LOGIC --
+async function connectToDevice(device) {
+  bleDevice = device;
+  bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+  
+  ui.status.innerText = 'Connecting...';
+  const server = await bleDevice.gatt.connect();
+  
+  ui.status.innerText = 'Getting Service...';
+  const service = await server.getPrimaryService(SERVICE_UUID);
+  
+  ui.status.innerText = 'Getting Characteristics...';
+  const charLeft = await service.getCharacteristic(CHAR_LEFT_PSI_UUID);
+  const charRight = await service.getCharacteristic(CHAR_RIGHT_PSI_UUID);
+  cmdCharacteristic = await service.getCharacteristic(CHAR_CMD_UUID);
+
+  // Setup Notifications
+  await charLeft.startNotifications();
+  charLeft.addEventListener('characteristicvaluechanged', handleLeftPsi);
+  
+  await charRight.startNotifications();
+  charRight.addEventListener('characteristicvaluechanged', handleRightPsi);
+
+  onConnected();
+}
+
+// -- AUTO-RECONNECT ON APP OPEN --
+async function autoReconnect() {
+  // Check if the browser supports getDevices (Chrome 85+, Edge)
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) {
+    console.log('Auto-reconnect not supported in this browser.');
+    return;
+  }
+
+  try {
+    const devices = await navigator.bluetooth.getDevices();
+    // Find a previously paired ESP32
+    const esp32 = devices.find(d => d.name && d.name.startsWith('ESP32'));
+    
+    if (!esp32) {
+      console.log('No previously paired ESP32 found.');
+      return;
+    }
+
+    console.log('Found previously paired device:', esp32.name);
+    isAutoReconnecting = true;
+    ui.status.innerText = 'Reconnecting...';
+    ui.btnConnect.innerText = 'CONNECTING...';
+    ui.btnConnect.classList.add('reconnecting');
+
+    // Listen for the device's advertisement to know it's in range
+    const abortController = new AbortController();
+    
+    // Set a timeout — give up after 5 seconds
+    const timeout = setTimeout(() => {
+      abortController.abort();
+      if (!bleDevice || !bleDevice.gatt.connected) {
+        isAutoReconnecting = false;
+        ui.status.innerText = 'Tap CONNECT to pair';
+        ui.btnConnect.innerText = 'CONNECT';
+        ui.btnConnect.classList.remove('reconnecting');
+        console.log('Auto-reconnect timed out.');
+      }
+    }, 5000);
+
+    esp32.addEventListener('advertisementreceived', async (evt) => {
+      console.log('Advertisement received, connecting...');
+      clearTimeout(timeout);
+      abortController.abort(); // Stop watching
+      try {
+        await connectToDevice(esp32);
+        isAutoReconnecting = false;
+      } catch (err) {
+        console.warn('Auto-reconnect failed:', err);
+        isAutoReconnecting = false;
+        ui.status.innerText = 'Tap CONNECT to pair';
+        ui.btnConnect.innerText = 'CONNECT';
+        ui.btnConnect.classList.remove('reconnecting');
+      }
+    }, { once: true });
+
+    await esp32.watchAdvertisements({ signal: abortController.signal });
+  } catch (err) {
+    console.warn('Auto-reconnect error:', err);
+    isAutoReconnecting = false;
+    ui.status.innerText = 'Tap CONNECT to pair';
+    ui.btnConnect.innerText = 'CONNECT';
+    ui.btnConnect.classList.remove('reconnecting');
+  }
+}
+
+// Kick off auto-reconnect when the page loads
+autoReconnect();
+
+// -- MANUAL BLUETOOTH CONNECTION --
 ui.btnConnect.addEventListener('click', async () => {
+  // Don't interfere if auto-reconnect is in progress
+  if (isAutoReconnecting) return;
+
   if (bleDevice && bleDevice.gatt.connected) {
     bleDevice.gatt.disconnect();
     return;
@@ -40,32 +138,12 @@ ui.btnConnect.addEventListener('click', async () => {
   
   try {
     ui.status.innerText = 'Requesting Bluetooth Device...';
-    bleDevice = await navigator.bluetooth.requestDevice({
+    const device = await navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: 'ESP32' }, { services: [SERVICE_UUID] }],
       optionalServices: [SERVICE_UUID]
     });
 
-    bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
-    ui.status.innerText = 'Connecting to GATT Server...';
-    
-    const server = await bleDevice.gatt.connect();
-    ui.status.innerText = 'Getting Service...';
-    
-    const service = await server.getPrimaryService(SERVICE_UUID);
-    ui.status.innerText = 'Getting Characteristics...';
-    
-    const charLeft = await service.getCharacteristic(CHAR_LEFT_PSI_UUID);
-    const charRight = await service.getCharacteristic(CHAR_RIGHT_PSI_UUID);
-    cmdCharacteristic = await service.getCharacteristic(CHAR_CMD_UUID);
-
-    // Setup Notifications
-    await charLeft.startNotifications();
-    charLeft.addEventListener('characteristicvaluechanged', handleLeftPsi);
-    
-    await charRight.startNotifications();
-    charRight.addEventListener('characteristicvaluechanged', handleRightPsi);
-
-    onConnected();
+    await connectToDevice(device);
   } catch (error) {
     console.warn(error);
     ui.status.innerText = 'Connection Failed: ' + error.message;
@@ -74,13 +152,14 @@ ui.btnConnect.addEventListener('click', async () => {
 
 function onConnected() {
   ui.status.innerText = 'Connected';
+  ui.btnConnect.classList.remove('reconnecting');
   ui.btnConnect.classList.add('connected');
   ui.btnConnect.innerText = 'DISCONNECT';
   ui.btnStart.classList.remove('disabled');
 }
 
 function onDisconnected() {
-  ui.status.innerText = 'No Device Selected';
+  ui.status.innerText = 'Disconnected';
   ui.btnConnect.classList.remove('connected');
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
@@ -91,6 +170,9 @@ function onDisconnected() {
   appliedLeft = 0;
   appliedRight = 0;
   updateDisplay();
+
+  // Try to auto-reconnect after a disconnect (e.g. ESP32 rebooted)
+  setTimeout(() => autoReconnect(), 1500);
 }
 
 // -- SENSOR HANDLING --
