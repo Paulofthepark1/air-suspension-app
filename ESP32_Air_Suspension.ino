@@ -24,14 +24,14 @@ int targetRightPsi = 0;
 const int HYSTERESIS = 2; // +/- 2 PSI tolerance to prevent rapid valve clicking
 bool commandReceived = false; // Solenoids stay off until user sends SET
 
-// ---- PIN DEFINITIONS ----
-const int LEFT_AIR_IN_PIN  = 4;  
-const int LEFT_AIR_OUT_PIN = 5;  
-const int RIGHT_AIR_IN_PIN = 18; 
-const int RIGHT_AIR_OUT_PIN = 19; 
-const int SENSOR_PIN = 34; // Simulation analog pin
+// ---- PIN DEFINITIONS (boot-safe for active-LOW relays) ----
+const int LEFT_AIR_IN_PIN  = 13;  
+const int LEFT_AIR_OUT_PIN = 14;  
+const int RIGHT_AIR_IN_PIN = 27; 
+const int RIGHT_AIR_OUT_PIN = 26; 
+const int SENSOR_PIN = 34;
 
-// Relay logic - Blue relay boards are typically Active-LOW
+// Relay logic - Active-LOW: LOW triggers optocoupler, HIGH = relay off
 #define RELAY_ON LOW
 #define RELAY_OFF HIGH
 
