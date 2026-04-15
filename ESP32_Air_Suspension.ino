@@ -136,11 +136,18 @@ void loop() {
       int rawAdc = analogRead(SENSOR_PIN);
       float voltage = rawAdc * (3.3 / 4095.0);
 
+      // Debug output - check Serial Monitor at 115200 baud
+      Serial.print("Raw ADC: ");
+      Serial.print(rawAdc);
+      Serial.print("  Voltage: ");
+      Serial.print(voltage, 3);
+
       char lStr[10];
       // If voltage is below 0.15V, sensor is probably not connected
       if (voltage < 0.15) {
         sprintf(lStr, "---");
         leftPsi = -1; // flag as disconnected
+        Serial.println("  PSI: --- (no sensor)");
       } else {
         // Clamp to valid sensor range
         if (voltage < 0.34) voltage = 0.34;
@@ -148,6 +155,8 @@ void loop() {
         // Map 0.34V-3.09V to 0-150 PSI (10k/22k divider)
         leftPsi = (int)((voltage - 0.34) * (150.0 / (3.09 - 0.34)));
         sprintf(lStr, "%d", leftPsi);
+        Serial.print("V  PSI: ");
+        Serial.println(leftPsi);
       }
       pCharLeft->setValue((uint8_t*)lStr, strlen(lStr));
       pCharLeft->notify();
