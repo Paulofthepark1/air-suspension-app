@@ -107,7 +107,7 @@ function handleRightPsi(event) {
 }
 
 // -- TARGET CONTROLS LOGIC --
-let isSyncOn = false;
+let isSyncOn = true;
 
 ui.btnSync.addEventListener('click', () => {
   isSyncOn = !isSyncOn;
