@@ -24,16 +24,17 @@ int targetRightPsi = 0;
 const int HYSTERESIS = 2; // +/- 2 PSI tolerance to prevent rapid valve clicking
 bool commandReceived = false; // Solenoids stay off until user sends SET
 
-// ---- PIN DEFINITIONS (boot-safe for active-LOW relays) ----
-const int LEFT_AIR_IN_PIN  = 13;  
-const int LEFT_AIR_OUT_PIN = 14;  
-const int RIGHT_AIR_IN_PIN = 27; 
-const int RIGHT_AIR_OUT_PIN = 26; 
+// ---- PIN DEFINITIONS ----
+const int LEFT_AIR_IN_PIN  = 4;  
+const int LEFT_AIR_OUT_PIN = 5;  
+const int RIGHT_AIR_IN_PIN = 18; 
+const int RIGHT_AIR_OUT_PIN = 19; 
 const int SENSOR_PIN = 34;
 
-// Relay logic - Active-LOW: LOW triggers optocoupler, HIGH = relay off
-#define RELAY_ON LOW
-#define RELAY_OFF HIGH
+// Relay logic - Active-HIGH: 3.3V triggers optocoupler to GND, 0V = relay off
+// Active-HIGH is required for 3.3V GPIO → 5V relay boards to avoid chatter
+#define RELAY_ON HIGH
+#define RELAY_OFF LOW
 
 // Service and Characteristics
 #define SERVICE_UUID           "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
