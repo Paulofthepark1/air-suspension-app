@@ -10,6 +10,7 @@
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
 BLECharacteristic* pCharRight = NULL;
+BLECharacteristic* pCharTank = NULL;
 BLECharacteristic* pCharCmd = NULL;
 
 bool deviceConnected = false;
@@ -18,6 +19,7 @@ bool oldDeviceConnected = false;
 // State Tracking (-1 means no sensor / no reading)
 int leftPsi = -1;
 int rightPsi = -1;
+int tankPsi = -1;
 int targetLeftPsi = 0;
 int targetRightPsi = 0;
 
@@ -29,7 +31,9 @@ const int LEFT_AIR_IN_PIN  = 4;
 const int LEFT_AIR_OUT_PIN = 5;  
 const int RIGHT_AIR_IN_PIN = 18; 
 const int RIGHT_AIR_OUT_PIN = 19; 
-const int SENSOR_PIN = 34;
+const int LEFT_SENSOR_PIN = 34;
+const int RIGHT_SENSOR_PIN = 35;
+const int TANK_SENSOR_PIN = 32;
 
 // Relay logic - Active-HIGH: 3.3V triggers optocoupler to GND, 0V = relay off
 // Active-HIGH is required for 3.3V GPIO → 5V relay boards to avoid chatter
@@ -40,6 +44,7 @@ const int SENSOR_PIN = 34;
 #define SERVICE_UUID           "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHAR_LEFT_PSI_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define CHAR_RIGHT_PSI_UUID    "beb5483e-36e2-4688-b7f5-ea07361b26a8"
+#define CHAR_TANK_PSI_UUID     "beb5483e-36e4-4688-b7f5-ea07361b26a8"
 #define CHAR_CMD_UUID          "beb5483e-36e3-4688-b7f5-ea07361b26a8"
 
 void stopAllSolenoids() {
@@ -119,6 +124,10 @@ void setup() {
   pCharRight = pService->createCharacteristic(CHAR_RIGHT_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);                   
   pCharRight->addDescriptor(new BLE2902());
 
+  // Tank PSI TX
+  pCharTank = pService->createCharacteristic(CHAR_TANK_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);                   
+  pCharTank->addDescriptor(new BLE2902());
+
   // Command RX
   pCharCmd = pService->createCharacteristic(CHAR_CMD_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pCharCmd->setCallbacks(new MyCmdCallbacks());
@@ -144,7 +153,7 @@ void loop() {
       lastSensorUpdate = millis();
 
       // LEFT SENSOR on Pin 34 (ADC1)
-      int rawAdc = analogRead(SENSOR_PIN);
+      int rawAdc = analogRead(LEFT_SENSOR_PIN);
       float voltage = rawAdc * (3.3 / 4095.0);
 
       // Debug output - check Serial Monitor at 115200 baud
@@ -172,11 +181,37 @@ void loop() {
       pCharLeft->setValue((uint8_t*)lStr, strlen(lStr));
       pCharLeft->notify();
 
-      // RIGHT SENSOR - No sensor wired yet, send dashes
-      const char* rStr = "---";
-      rightPsi = -1;
+      // RIGHT SENSOR on Pin 35 (ADC1)
+      int rawAdcR = analogRead(RIGHT_SENSOR_PIN);
+      float voltageR = rawAdcR * (3.3 / 4095.0);
+      char rStr[10];
+      if (voltageR < 0.15) {
+        sprintf(rStr, "---");
+        rightPsi = -1;
+      } else {
+        if (voltageR < 0.34) voltageR = 0.34;
+        if (voltageR > 3.09) voltageR = 3.09;
+        rightPsi = (int)((voltageR - 0.34) * (150.0 / (3.09 - 0.34)));
+        sprintf(rStr, "%d", rightPsi);
+      }
       pCharRight->setValue((uint8_t*)rStr, strlen(rStr));
       pCharRight->notify();
+
+      // TANK SENSOR on Pin 32 (ADC1)
+      int rawAdcT = analogRead(TANK_SENSOR_PIN);
+      float voltageT = rawAdcT * (3.3 / 4095.0);
+      char tStr[10];
+      if (voltageT < 0.15) {
+        sprintf(tStr, "---");
+        tankPsi = -1;
+      } else {
+        if (voltageT < 0.34) voltageT = 0.34;
+        if (voltageT > 3.09) voltageT = 3.09;
+        tankPsi = (int)((voltageT - 0.34) * (150.0 / (3.09 - 0.34)));
+        sprintf(tStr, "%d", tankPsi);
+      }
+      pCharTank->setValue((uint8_t*)tStr, strlen(tStr));
+      pCharTank->notify();
     }
 
     // --- 2. CONTROL LOOP (50ms interval) - ONLY after user sends SET ---

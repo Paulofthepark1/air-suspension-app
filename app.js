@@ -8,6 +8,7 @@ if ('serviceWorker' in navigator) {
 const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 const CHAR_LEFT_PSI_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const CHAR_RIGHT_PSI_UUID = "beb5483e-36e2-4688-b7f5-ea07361b26a8";
+const CHAR_TANK_PSI_UUID = "beb5483e-36e4-4688-b7f5-ea07361b26a8";
 const CHAR_CMD_UUID = "beb5483e-36e3-4688-b7f5-ea07361b26a8";
 
 let bleDevice = null;
@@ -29,7 +30,8 @@ const ui = {
   targetLeft: document.getElementById('target-left'),
   targetRight: document.getElementById('target-right'),
   valLeft: document.getElementById('val-left'),
-  valRight: document.getElementById('val-right')
+  valRight: document.getElementById('val-right'),
+  valTank: document.getElementById('val-tank')
 };
 
 // -- SHARED CONNECTION LOGIC --
@@ -46,6 +48,7 @@ async function connectToDevice(device) {
   ui.status.innerText = 'Getting Characteristics...';
   const charLeft = await service.getCharacteristic(CHAR_LEFT_PSI_UUID);
   const charRight = await service.getCharacteristic(CHAR_RIGHT_PSI_UUID);
+  const charTank = await service.getCharacteristic(CHAR_TANK_PSI_UUID);
   cmdCharacteristic = await service.getCharacteristic(CHAR_CMD_UUID);
 
   // Setup Notifications
@@ -54,6 +57,9 @@ async function connectToDevice(device) {
   
   await charRight.startNotifications();
   charRight.addEventListener('characteristicvaluechanged', handleRightPsi);
+
+  await charTank.startNotifications();
+  charTank.addEventListener('characteristicvaluechanged', handleTankPsi);
 
   onConnected();
 }
@@ -186,6 +192,14 @@ function handleRightPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valRight.innerText = value;
+}
+
+function handleTankPsi(event) {
+  const decoder = new TextDecoder('utf-8');
+  let value = decoder.decode(event.target.value);
+  if (ui.valTank) {
+    ui.valTank.innerText = value;
+  }
 }
 
 // -- TARGET CONTROLS LOGIC --
