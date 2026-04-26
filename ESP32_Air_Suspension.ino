@@ -6,12 +6,14 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <Arduino.h>
+#include <LittleFS.h>
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
 BLECharacteristic* pCharRight = NULL;
 BLECharacteristic* pCharTank = NULL;
 BLECharacteristic* pCharCmd = NULL;
+BLECharacteristic* pCharGraph = NULL;
 
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
@@ -26,14 +28,21 @@ int targetRightPsi = 0;
 const int HYSTERESIS = 2; // +/- 2 PSI tolerance to prevent rapid valve clicking
 bool commandReceived = false; // Solenoids stay off until user sends SET
 
-// ---- PIN DEFINITIONS ----
-const int LEFT_AIR_IN_PIN  = 19;  
-const int LEFT_AIR_OUT_PIN = 18;  
-const int RIGHT_AIR_IN_PIN = 5; 
-const int RIGHT_AIR_OUT_PIN = 4; 
-const int LEFT_SENSOR_PIN = 34;
-const int RIGHT_SENSOR_PIN = 35;
-const int TANK_SENSOR_PIN = 32;
+// Graph Logging Variables
+unsigned long bootTimestamp = 0;
+bool timeSet = false;
+bool isStreamingGraph = false;
+File streamingFile;
+unsigned long lastLogUpdate = 0;
+
+// ---- PIN DEFINITIONS (ESP32-S3) ----
+const int LEFT_AIR_IN_PIN  = 48;  
+const int LEFT_AIR_OUT_PIN = 47;  
+const int RIGHT_AIR_IN_PIN = 21; 
+const int RIGHT_AIR_OUT_PIN = 20; 
+const int LEFT_SENSOR_PIN = 4;
+const int RIGHT_SENSOR_PIN = 5;
+const int TANK_SENSOR_PIN = 6;
 
 // Relay logic - Active-HIGH: 3.3V triggers optocoupler to GND, 0V = relay off
 // Active-HIGH is required for 3.3V GPIO → 5V relay boards to avoid chatter
@@ -46,6 +55,7 @@ const int TANK_SENSOR_PIN = 32;
 #define CHAR_RIGHT_PSI_UUID    "beb5483e-36e2-4688-b7f5-ea07361b26a8"
 #define CHAR_TANK_PSI_UUID     "beb5483e-36e4-4688-b7f5-ea07361b26a8"
 #define CHAR_CMD_UUID          "beb5483e-36e3-4688-b7f5-ea07361b26a8"
+#define CHAR_GRAPH_UUID        "beb5483e-36e5-4688-b7f5-ea07361b26a8"
 
 void stopAllSolenoids() {
   digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
@@ -93,6 +103,29 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
     }
 };
 
+class MyGraphCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      String rxValue = pCharacteristic->getValue();
+      
+      if (rxValue.startsWith("TIME:")) {
+         unsigned long currentEpoch = rxValue.substring(5).toInt();
+         bootTimestamp = currentEpoch - (millis() / 1000);
+         timeSet = true;
+         Serial.print("Time set! Boot epoch: ");
+         Serial.println(bootTimestamp);
+      }
+      else if (rxValue.startsWith("GET")) {
+         Serial.println("App requested graph data.");
+         isStreamingGraph = true;
+         streamingFile = LittleFS.open("/history.csv", FILE_READ);
+      }
+      else if (rxValue.startsWith("CLEAR")) {
+         LittleFS.remove("/history.csv");
+         Serial.println("Cleared history");
+      }
+    }
+};
+
 void setup() {
   Serial.begin(115200);
 
@@ -109,6 +142,12 @@ void setup() {
   pinMode(RIGHT_AIR_OUT_PIN, OUTPUT);
 
   stopAllSolenoids();
+
+  if(!LittleFS.begin(true)){
+    Serial.println("LittleFS Mount Failed");
+  } else {
+    Serial.println("LittleFS Mounted Successfully");
+  }
 
   BLEDevice::init("Air Bags");
 
@@ -131,6 +170,11 @@ void setup() {
   // Command RX
   pCharCmd = pService->createCharacteristic(CHAR_CMD_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pCharCmd->setCallbacks(new MyCmdCallbacks());
+
+  // Graph Data
+  pCharGraph = pService->createCharacteristic(CHAR_GRAPH_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE);
+  pCharGraph->addDescriptor(new BLE2902());
+  pCharGraph->setCallbacks(new MyGraphCallbacks());
 
   pService->start();
 
@@ -269,5 +313,43 @@ void loop() {
       // Initialize targets to 0 when newly connected
       targetLeftPsi = 0;
       targetRightPsi = 0;
+  }
+
+  // --- 3. GRAPH STREAMING ---
+  if (isStreamingGraph) {
+    if (streamingFile && streamingFile.available()) {
+        char chunk[200];
+        int bytesRead = streamingFile.readBytes(chunk, 199);
+        chunk[bytesRead] = 0;
+        pCharGraph->setValue((uint8_t*)chunk, bytesRead);
+        pCharGraph->notify();
+        delay(20);
+    } else {
+        isStreamingGraph = false;
+        if (streamingFile) streamingFile.close();
+        pCharGraph->setValue("END");
+        pCharGraph->notify();
+        Serial.println("Finished streaming graph data.");
+    }
+  }
+
+  // --- 4. DATA LOGGING (Every 60s) ---
+  if (timeSet && millis() - lastLogUpdate > 60000) {
+    lastLogUpdate = millis();
+    unsigned long currentEpoch = bootTimestamp + (millis() / 1000);
+    File file = LittleFS.open("/history.csv", FILE_APPEND);
+    if (file) {
+        char logStr[80];
+        sprintf(logStr, "%lu,%d,%d,%d,%d,%d\n", currentEpoch, 
+                leftPsi >= 0 ? leftPsi : 0, 
+                rightPsi >= 0 ? rightPsi : 0, 
+                tankPsi >= 0 ? tankPsi : 0,
+                targetLeftPsi,
+                targetRightPsi);
+        file.print(logStr);
+        file.close();
+        Serial.print("Logged: ");
+        Serial.print(logStr);
+    }
   }
 }

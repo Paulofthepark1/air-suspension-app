@@ -10,9 +10,11 @@ const CHAR_LEFT_PSI_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 const CHAR_RIGHT_PSI_UUID = "beb5483e-36e2-4688-b7f5-ea07361b26a8";
 const CHAR_TANK_PSI_UUID = "beb5483e-36e4-4688-b7f5-ea07361b26a8";
 const CHAR_CMD_UUID = "beb5483e-36e3-4688-b7f5-ea07361b26a8";
+const CHAR_GRAPH_UUID = "beb5483e-36e5-4688-b7f5-ea07361b26a8";
 
 let bleDevice = null;
 let cmdCharacteristic = null;
+let graphCharacteristic = null;
 let isAutoReconnecting = false;
 
 // Target state
@@ -31,7 +33,10 @@ const ui = {
   targetRight: document.getElementById('target-right'),
   valLeft: document.getElementById('val-left'),
   valRight: document.getElementById('val-right'),
-  valTank: document.getElementById('val-tank')
+  valTank: document.getElementById('val-tank'),
+  btnGraph: document.getElementById('btn-graph'),
+  graphModal: document.getElementById('graph-modal'),
+  btnCloseGraph: document.getElementById('btn-close-graph')
 };
 
 // -- SHARED CONNECTION LOGIC --
@@ -50,6 +55,7 @@ async function connectToDevice(device) {
   const charRight = await service.getCharacteristic(CHAR_RIGHT_PSI_UUID);
   const charTank = await service.getCharacteristic(CHAR_TANK_PSI_UUID);
   cmdCharacteristic = await service.getCharacteristic(CHAR_CMD_UUID);
+  graphCharacteristic = await service.getCharacteristic(CHAR_GRAPH_UUID);
 
   // Setup Notifications
   await charLeft.startNotifications();
@@ -60,6 +66,9 @@ async function connectToDevice(device) {
 
   await charTank.startNotifications();
   charTank.addEventListener('characteristicvaluechanged', handleTankPsi);
+
+  await graphCharacteristic.startNotifications();
+  graphCharacteristic.addEventListener('characteristicvaluechanged', handleGraphData);
 
   onConnected();
 }
@@ -162,6 +171,23 @@ function onConnected() {
   ui.btnConnect.classList.add('connected');
   ui.btnConnect.innerText = 'DISCONNECT';
   ui.btnStart.classList.remove('disabled');
+  ui.btnGraph.style.display = 'inline-block';
+  
+  sendTimeAndRequestSync();
+}
+
+async function sendTimeAndRequestSync() {
+  if (!graphCharacteristic) return;
+  const currentEpoch = Math.floor(Date.now() / 1000);
+  const encoder = new TextEncoder('utf-8');
+  try {
+    await graphCharacteristic.writeValue(encoder.encode("TIME:" + currentEpoch));
+    setTimeout(async () => {
+      await graphCharacteristic.writeValue(encoder.encode("GET"));
+    }, 500); // Give ESP32 a moment to process the time setting
+  } catch(e) {
+    console.error("Time sync failed", e);
+  }
 }
 
 function onDisconnected() {
@@ -169,7 +195,9 @@ function onDisconnected() {
   ui.btnConnect.classList.remove('connected');
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
+  ui.btnGraph.style.display = 'none';
   cmdCharacteristic = null;
+  graphCharacteristic = null;
   // Reset targets to 0 for next session
   targetLeft = 0;
   targetRight = 0;
@@ -298,5 +326,103 @@ ui.btnStart.addEventListener('click', async () => {
     setTimeout(() => { ui.btnStart.innerText = "SET"; }, 1500);
   } catch(e) {
     console.error("Write error", e);
+  }
+});
+
+// -- GRAPH LOGIC --
+let graphBuffer = "";
+let chartInstance = null;
+
+function handleGraphData(event) {
+  const decoder = new TextDecoder('utf-8');
+  let chunk = decoder.decode(event.target.value);
+  
+  if (chunk === "END") {
+    console.log("Graph sync complete");
+    parseAndSaveGraphData(graphBuffer);
+    graphBuffer = ""; // reset
+  } else {
+    graphBuffer += chunk;
+  }
+}
+
+function parseAndSaveGraphData(csvStr) {
+  if (!csvStr) return;
+  localStorage.setItem('pressureHistory', csvStr);
+}
+
+function renderChart() {
+  const csvStr = localStorage.getItem('pressureHistory');
+  if (!csvStr) {
+     alert("No graph data available yet. Please wait for a sync.");
+     return;
+  }
+  
+  const lines = csvStr.trim().split('\n');
+  const labels = [];
+  const leftData = [];
+  const rightData = [];
+  const tankData = [];
+  const targetLeftData = [];
+  const targetRightData = [];
+  
+  lines.forEach(line => {
+     const parts = line.split(',');
+     if(parts.length >= 4) {
+        const date = new Date(parseInt(parts[0]) * 1000);
+        const timeStr = date.getHours().toString().padStart(2, '0') + ':' + date.getMinutes().toString().padStart(2, '0');
+        labels.push(timeStr);
+        leftData.push(parseInt(parts[1]));
+        rightData.push(parseInt(parts[2]));
+        tankData.push(parseInt(parts[3]));
+        if (parts.length >= 6) {
+           targetLeftData.push(parseInt(parts[4]));
+           targetRightData.push(parseInt(parts[5]));
+        } else {
+           targetLeftData.push(null);
+           targetRightData.push(null);
+        }
+     }
+  });
+
+  const ctx = document.getElementById('pressureChart').getContext('2d');
+  if (chartInstance) {
+     chartInstance.destroy();
+  }
+  
+  chartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+          labels: labels,
+          datasets: [
+              { label: 'Left', data: leftData, borderColor: '#34c759', backgroundColor: 'rgba(52, 199, 89, 0.1)', tension: 0.2, fill: true },
+              { label: 'Right', data: rightData, borderColor: '#ff3b30', backgroundColor: 'rgba(255, 59, 48, 0.1)', tension: 0.2, fill: true },
+              { label: 'Tank', data: tankData, borderColor: '#007aff', backgroundColor: 'rgba(0, 122, 255, 0.1)', tension: 0.2, fill: true },
+              { label: 'Set Left', data: targetLeftData, borderColor: '#34c759', borderDash: [5, 5], backgroundColor: 'transparent', tension: 0.2, fill: false },
+              { label: 'Set Right', data: targetRightData, borderColor: '#ff3b30', borderDash: [5, 5], backgroundColor: 'transparent', tension: 0.2, fill: false }
+          ]
+      },
+      options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+              y: { beginAtZero: true, suggestedMax: 150 }
+          }
+      }
+  });
+}
+
+ui.btnGraph.addEventListener('click', () => {
+   renderChart();
+   ui.graphModal.style.display = "block";
+});
+
+ui.btnCloseGraph.addEventListener('click', () => {
+   ui.graphModal.style.display = "none";
+});
+
+window.addEventListener('click', (event) => {
+  if (event.target == ui.graphModal) {
+    ui.graphModal.style.display = "none";
   }
 });
