@@ -36,7 +36,8 @@ const ui = {
   valTank: document.getElementById('val-tank'),
   btnGraph: document.getElementById('btn-graph'),
   graphModal: document.getElementById('graph-modal'),
-  btnCloseGraph: document.getElementById('btn-close-graph')
+  btnCloseGraph: document.getElementById('btn-close-graph'),
+  btnDump: document.getElementById('btn-dump')
 };
 
 // -- SHARED CONNECTION LOGIC --
@@ -328,6 +329,37 @@ ui.btnStart.addEventListener('click', async () => {
     console.error("Write error", e);
   }
 });
+
+// -- EMPTY AIR TANK LOGIC --
+const startDump = async (e) => {
+  e.preventDefault();
+  if (!cmdCharacteristic) return;
+  try {
+    const encoder = new TextEncoder('utf-8');
+    await cmdCharacteristic.writeValue(encoder.encode("DUMP:1"));
+    ui.btnDump.style.backgroundColor = "#d32f2f";
+  } catch (err) {
+    console.error("Dump error", err);
+  }
+};
+
+const stopDump = async (e) => {
+  e.preventDefault();
+  if (!cmdCharacteristic) return;
+  try {
+    const encoder = new TextEncoder('utf-8');
+    await cmdCharacteristic.writeValue(encoder.encode("DUMP:0"));
+    ui.btnDump.style.backgroundColor = "#ff3b30";
+  } catch (err) {
+    console.error("Stop Dump error", err);
+  }
+};
+
+ui.btnDump.addEventListener('mousedown', startDump);
+ui.btnDump.addEventListener('touchstart', startDump, {passive: false});
+ui.btnDump.addEventListener('mouseup', stopDump);
+ui.btnDump.addEventListener('touchend', stopDump);
+ui.btnDump.addEventListener('mouseleave', stopDump);
 
 // -- GRAPH LOGIC --
 let graphBuffer = "";

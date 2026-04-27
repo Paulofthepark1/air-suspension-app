@@ -36,10 +36,11 @@ File streamingFile;
 unsigned long lastLogUpdate = 0;
 
 // ---- PIN DEFINITIONS (ESP32-S3) ----
-const int LEFT_AIR_IN_PIN  = 48;  
-const int LEFT_AIR_OUT_PIN = 47;  
-const int RIGHT_AIR_IN_PIN = 21; 
-const int RIGHT_AIR_OUT_PIN = 20; 
+const int LEFT_AIR_IN_PIN  = 38;  
+const int LEFT_AIR_OUT_PIN = 39;  
+const int RIGHT_AIR_IN_PIN = 40; 
+const int RIGHT_AIR_OUT_PIN = 41; 
+const int TANK_DUMP_PIN = 42;
 const int LEFT_SENSOR_PIN = 4;
 const int RIGHT_SENSOR_PIN = 5;
 const int TANK_SENSOR_PIN = 6;
@@ -62,6 +63,7 @@ void stopAllSolenoids() {
   digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
   digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
   digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+  digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
 }
 
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -81,7 +83,7 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       String rxValue = pCharacteristic->getValue(); // Now officially String for > 3.0.0
       
-      // Expected format: SET:80:85  (Left:Right)
+      // Expected format: SET:80:85  (Left:Right) or DUMP:1 / DUMP:0
       if (rxValue.startsWith("SET:")) {
         int firstColon = rxValue.indexOf(':');
         int secondColon = rxValue.indexOf(':', firstColon + 1);
@@ -99,6 +101,12 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
           Serial.print(" Right: ");
           Serial.println(targetRightPsi);
         }
+      } else if (rxValue == "DUMP:1") {
+        digitalWrite(TANK_DUMP_PIN, RELAY_ON);
+        Serial.println("Dumping tank...");
+      } else if (rxValue == "DUMP:0") {
+        digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
+        Serial.println("Stopped dumping tank.");
       }
     }
 };
@@ -134,12 +142,14 @@ void setup() {
   digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
   digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
   digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+  digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
 
   // Initialize Pins
   pinMode(LEFT_AIR_IN_PIN, OUTPUT);
   pinMode(LEFT_AIR_OUT_PIN, OUTPUT);
   pinMode(RIGHT_AIR_IN_PIN, OUTPUT);
   pinMode(RIGHT_AIR_OUT_PIN, OUTPUT);
+  pinMode(TANK_DUMP_PIN, OUTPUT);
 
   stopAllSolenoids();
 
