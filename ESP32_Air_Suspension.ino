@@ -36,11 +36,11 @@ File streamingFile;
 unsigned long lastLogUpdate = 0;
 
 // ---- PIN DEFINITIONS (ESP32-S3) ----
-const int LEFT_AIR_IN_PIN  = 38;  
-const int LEFT_AIR_OUT_PIN = 39;  
+const int LEFT_AIR_IN_PIN  = 42;  
+const int LEFT_AIR_OUT_PIN = 41;  
 const int RIGHT_AIR_IN_PIN = 40; 
-const int RIGHT_AIR_OUT_PIN = 41; 
-const int TANK_DUMP_PIN = 42;
+const int RIGHT_AIR_OUT_PIN = 39; 
+const int TANK_DUMP_PIN = 38;
 const int LEFT_SENSOR_PIN = 4;
 const int RIGHT_SENSOR_PIN = 5;
 const int TANK_SENSOR_PIN = 6;
