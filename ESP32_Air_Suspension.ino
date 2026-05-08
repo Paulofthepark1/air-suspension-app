@@ -7,6 +7,10 @@
 #include <BLE2902.h>
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -14,6 +18,17 @@ BLECharacteristic* pCharRight = NULL;
 BLECharacteristic* pCharTank = NULL;
 BLECharacteristic* pCharCmd = NULL;
 BLECharacteristic* pCharGraph = NULL;
+BLECharacteristic* pCharOtaStatus = NULL;
+
+const char* ssid = "frustration";
+const char* password = "summer12";
+
+bool otaMode = false;
+bool otaWifiConnected = false;
+bool otaUpdateStarted = false;
+unsigned long otaStartTime = 0;
+unsigned long otaConnectedTime = 0;
+String otaErrorMessage = "";
 
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
@@ -57,6 +72,7 @@ const int TANK_SENSOR_PIN = 6;
 #define CHAR_TANK_PSI_UUID     "beb5483e-36e4-4688-b7f5-ea07361b26a8"
 #define CHAR_CMD_UUID          "beb5483e-36e3-4688-b7f5-ea07361b26a8"
 #define CHAR_GRAPH_UUID        "beb5483e-36e5-4688-b7f5-ea07361b26a8"
+#define CHAR_OTA_STATUS_UUID   "beb5483e-36e6-4688-b7f5-ea07361b26a8"
 
 void stopAllSolenoids() {
   digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
@@ -107,6 +123,28 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
       } else if (rxValue == "DUMP:0") {
         digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
         Serial.println("Stopped dumping tank.");
+      } else if (rxValue == "OTA:1") {
+        Serial.println("OTA Update Requested. Pausing BLE and connecting to Wi-Fi...");
+        otaMode = true;
+        otaWifiConnected = false;
+        otaUpdateStarted = false;
+        otaStartTime = millis();
+        commandReceived = false;
+        stopAllSolenoids();
+        
+        // Connect to WiFi
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(ssid, password);
+      }
+    }
+};
+
+class MyOtaStatusCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      String rxValue = pCharacteristic->getValue();
+      if (rxValue == "CLEAR") {
+        otaErrorMessage = "";
+        pCharacteristic->setValue("");
       }
     }
 };
@@ -186,6 +224,11 @@ void setup() {
   pCharGraph->addDescriptor(new BLE2902());
   pCharGraph->setCallbacks(new MyGraphCallbacks());
 
+  // OTA Status
+  pCharOtaStatus = pService->createCharacteristic(CHAR_OTA_STATUS_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  pCharOtaStatus->setCallbacks(new MyOtaStatusCallbacks());
+  pCharOtaStatus->setValue("");
+
   pService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -200,6 +243,62 @@ unsigned long lastSensorUpdate = 0;
 unsigned long lastControlUpdate = 0;
 
 void loop() {
+  if (otaMode) {
+    if (!otaWifiConnected) {
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("Wi-Fi Connected! Starting ArduinoOTA...");
+        otaWifiConnected = true;
+        otaConnectedTime = millis();
+        
+        ArduinoOTA.onStart([]() {
+          String type;
+          if (ArduinoOTA.getCommand() == U_FLASH) {
+            type = "sketch";
+          } else { // U_FS
+            type = "filesystem";
+          }
+          Serial.println("Start updating " + type);
+          otaUpdateStarted = true;
+        });
+
+        ArduinoOTA.onEnd([]() {
+          Serial.println("\nEnd");
+        });
+
+        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+          Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+        });
+
+        ArduinoOTA.onError([](ota_error_t error) {
+          Serial.printf("Error[%u]: ", error);
+        });
+
+        ArduinoOTA.begin();
+      } else if (millis() - otaStartTime > 20000) { // 20s timeout
+        Serial.println("OTA Wi-Fi Timeout. Reverting to normal mode.");
+        otaMode = false;
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        otaErrorMessage = "Couldn't connect to Wi-Fi for OTA attempt.";
+        pCharOtaStatus->setValue(otaErrorMessage.c_str());
+      }
+    } else {
+      ArduinoOTA.handle();
+      
+      // 5 min timeout if connected but no files transferring
+      if (!otaUpdateStarted && (millis() - otaConnectedTime > 300000)) {
+         Serial.println("OTA Idle Timeout. No files received. Reverting to normal mode.");
+         otaMode = false;
+         otaWifiConnected = false;
+         WiFi.disconnect(true);
+         WiFi.mode(WIFI_OFF);
+         otaErrorMessage = "Wi-Fi connected for OTA but no files were received within 5 minutes.";
+         pCharOtaStatus->setValue(otaErrorMessage.c_str());
+      }
+    }
+    return; // Skip normal air suspension loop while in OTA mode
+  }
+
   if (deviceConnected) {
     
     // --- 1. SENSOR READING & NOTIFICATION ---

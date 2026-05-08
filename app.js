@@ -11,10 +11,12 @@ const CHAR_RIGHT_PSI_UUID = "beb5483e-36e2-4688-b7f5-ea07361b26a8";
 const CHAR_TANK_PSI_UUID = "beb5483e-36e4-4688-b7f5-ea07361b26a8";
 const CHAR_CMD_UUID = "beb5483e-36e3-4688-b7f5-ea07361b26a8";
 const CHAR_GRAPH_UUID = "beb5483e-36e5-4688-b7f5-ea07361b26a8";
+const CHAR_OTA_STATUS_UUID = "beb5483e-36e6-4688-b7f5-ea07361b26a8";
 
 let bleDevice = null;
 let cmdCharacteristic = null;
 let graphCharacteristic = null;
+let otaStatusCharacteristic = null;
 let isAutoReconnecting = false;
 
 // Target state
@@ -35,6 +37,7 @@ const ui = {
   valRight: document.getElementById('val-right'),
   valTank: document.getElementById('val-tank'),
   btnGraph: document.getElementById('btn-graph'),
+  btnOta: document.getElementById('btn-ota'),
   graphModal: document.getElementById('graph-modal'),
   btnCloseGraph: document.getElementById('btn-close-graph'),
   btnDump: document.getElementById('btn-dump')
@@ -57,6 +60,22 @@ async function connectToDevice(device) {
   const charTank = await service.getCharacteristic(CHAR_TANK_PSI_UUID);
   cmdCharacteristic = await service.getCharacteristic(CHAR_CMD_UUID);
   graphCharacteristic = await service.getCharacteristic(CHAR_GRAPH_UUID);
+  otaStatusCharacteristic = await service.getCharacteristic(CHAR_OTA_STATUS_UUID);
+
+  // Check for previous OTA error messages
+  ui.status.innerText = 'Checking OTA Status...';
+  try {
+    const otaStatusVal = await otaStatusCharacteristic.readValue();
+    const decoder = new TextDecoder('utf-8');
+    const otaMessage = decoder.decode(otaStatusVal);
+    if (otaMessage && otaMessage.trim() !== "") {
+      alert("Previous OTA Update Info: " + otaMessage);
+      const encoder = new TextEncoder('utf-8');
+      await otaStatusCharacteristic.writeValue(encoder.encode("CLEAR"));
+    }
+  } catch(e) {
+    console.warn("Could not read OTA status", e);
+  }
 
   // Setup Notifications
   await charLeft.startNotifications();
@@ -173,6 +192,7 @@ function onConnected() {
   ui.btnConnect.innerText = 'DISCONNECT';
   ui.btnStart.classList.remove('disabled');
   ui.btnGraph.style.display = 'inline-block';
+  ui.btnOta.style.display = 'inline-block';
   
   sendTimeAndRequestSync();
 }
@@ -197,8 +217,10 @@ function onDisconnected() {
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
   ui.btnGraph.style.display = 'none';
+  ui.btnOta.style.display = 'none';
   cmdCharacteristic = null;
   graphCharacteristic = null;
+  otaStatusCharacteristic = null;
   // Reset targets to 0 for next session
   targetLeft = 0;
   targetRight = 0;
@@ -360,6 +382,21 @@ ui.btnDump.addEventListener('touchstart', startDump, {passive: false});
 ui.btnDump.addEventListener('mouseup', stopDump);
 ui.btnDump.addEventListener('touchend', stopDump);
 ui.btnDump.addEventListener('mouseleave', stopDump);
+
+// -- OTA LOGIC --
+ui.btnOta.addEventListener('click', async () => {
+  if (!cmdCharacteristic) return;
+  const confirmed = confirm("This will disconnect Bluetooth and attempt to connect to Wi-Fi for an OTA update. Ensure you are parked in the driveway. Proceed?");
+  if (confirmed) {
+    try {
+      const encoder = new TextEncoder('utf-8');
+      await cmdCharacteristic.writeValue(encoder.encode("OTA:1"));
+      ui.status.innerText = "Switching to OTA mode...";
+    } catch(e) {
+      console.error("Write error", e);
+    }
+  }
+});
 
 // -- GRAPH LOGIC --
 let graphBuffer = "";
