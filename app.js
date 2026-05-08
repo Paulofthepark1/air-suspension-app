@@ -20,10 +20,10 @@ let otaStatusCharacteristic = null;
 let isAutoReconnecting = false;
 
 // Target state
-let targetLeft = 0;
-let targetRight = 0;
-let appliedLeft = 0;
-let appliedRight = 0;
+let targetLeft = parseInt(localStorage.getItem('targetLeft')) || 0;
+let targetRight = parseInt(localStorage.getItem('targetRight')) || 0;
+let appliedLeft = -1; // -1 so it shows as modified (red) until SET is pressed
+let appliedRight = -1;
 
 const ui = {
   status: document.getElementById('ble-status'),
@@ -221,11 +221,9 @@ function onDisconnected() {
   cmdCharacteristic = null;
   graphCharacteristic = null;
   otaStatusCharacteristic = null;
-  // Reset targets to 0 for next session
-  targetLeft = 0;
-  targetRight = 0;
-  appliedLeft = 0;
-  appliedRight = 0;
+  // Make targets modified again so user knows to hit SET
+  appliedLeft = -1;
+  appliedRight = -1;
   updateDisplay();
 
   // Try to auto-reconnect after a disconnect (e.g. ESP32 rebooted)
@@ -254,19 +252,28 @@ function handleTankPsi(event) {
 }
 
 // -- TARGET CONTROLS LOGIC --
-let isSyncOn = true;
+let isSyncOn = localStorage.getItem('isSyncOn') !== 'false'; // default true
+
+// Initialize sync UI on load
+ui.btnSync.innerText = isSyncOn ? "SYNC: ON" : "SYNC: OFF";
+ui.btnSync.classList.toggle('active', isSyncOn);
 
 ui.btnSync.addEventListener('click', () => {
   isSyncOn = !isSyncOn;
+  localStorage.setItem('isSyncOn', isSyncOn);
   ui.btnSync.innerText = isSyncOn ? "SYNC: ON" : "SYNC: OFF";
   ui.btnSync.classList.toggle('active', isSyncOn);
   
   if (isSyncOn) {
     // When sync turns on, match right to left by default
     targetRight = targetLeft;
+    localStorage.setItem('targetRight', targetRight);
     updateDisplay();
   }
 });
+
+// Run once on load to show saved values
+updateDisplay();
 
 function updateDisplay() {
   ui.targetLeft.innerText = targetLeft;
@@ -303,6 +310,8 @@ function adjustTarget(side, amount) {
       targetRight = Math.max(0, Math.min(150, targetRight + amount));
     }
   }
+  localStorage.setItem('targetLeft', targetLeft);
+  localStorage.setItem('targetRight', targetRight);
   updateDisplay();
 }
 

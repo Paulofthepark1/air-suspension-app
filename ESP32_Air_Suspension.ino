@@ -40,7 +40,15 @@ int tankPsi = -1;
 int targetLeftPsi = 0;
 int targetRightPsi = 0;
 
-const int HYSTERESIS = 2; // +/- 2 PSI tolerance to prevent rapid valve clicking
+enum ControlState {
+  IDLE,
+  FILLING,
+  DEFLATING
+};
+
+ControlState leftState = IDLE;
+ControlState rightState = IDLE;
+
 bool commandReceived = false; // Solenoids stay off until user sends SET
 
 // Graph Logging Variables
@@ -92,6 +100,8 @@ class MyServerCallbacks: public BLEServerCallbacks {
       stopAllSolenoids(); // Safety stop on disconnect
       targetLeftPsi = 0;
       targetRightPsi = 0;
+      leftState = IDLE;
+      rightState = IDLE;
     }
 };
 
@@ -112,6 +122,22 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
           targetRightPsi = rightStr.toInt();
           commandReceived = true; // NOW activate the control loop
           
+          if (leftPsi >= 0) {
+            if (targetLeftPsi > leftPsi) leftState = FILLING;
+            else if (targetLeftPsi < leftPsi) leftState = DEFLATING;
+            else leftState = IDLE;
+          } else {
+            leftState = IDLE;
+          }
+
+          if (rightPsi >= 0) {
+            if (targetRightPsi > rightPsi) rightState = FILLING;
+            else if (targetRightPsi < rightPsi) rightState = DEFLATING;
+            else rightState = IDLE;
+          } else {
+            rightState = IDLE;
+          }
+
           Serial.print("New targets - Left: ");
           Serial.print(targetLeftPsi);
           Serial.print(" Right: ");
@@ -372,37 +398,55 @@ void loop() {
       lastControlUpdate = millis();
 
       // LEFT SIDE LOGIC (only if sensor is connected)
-      if (leftPsi >= 0) {
-        if (leftPsi < targetLeftPsi - HYSTERESIS) {
-          digitalWrite(LEFT_AIR_IN_PIN, RELAY_ON);
-          digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
-        } else if (leftPsi > targetLeftPsi + HYSTERESIS) {
-          digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-          digitalWrite(LEFT_AIR_OUT_PIN, RELAY_ON);
-        } else {
-          digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-          digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+      if (leftPsi >= 0 && leftState != IDLE) {
+        if (leftState == FILLING) {
+          if (leftPsi >= targetLeftPsi) {
+            leftState = IDLE;
+            digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+          } else {
+            digitalWrite(LEFT_AIR_IN_PIN, RELAY_ON);
+            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+          }
+        } else if (leftState == DEFLATING) {
+          if (leftPsi <= targetLeftPsi) {
+            leftState = IDLE;
+            digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+          } else {
+            digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
+            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_ON);
+          }
         }
       } else {
-        // No sensor - ensure solenoids are off
+        // No sensor or target reached - ensure solenoids are off
         digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
         digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
       }
 
       // RIGHT SIDE LOGIC (only if sensor is connected)
-      if (rightPsi >= 0) {
-        if (rightPsi < targetRightPsi - HYSTERESIS) {
-          digitalWrite(RIGHT_AIR_IN_PIN, RELAY_ON);
-          digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
-        } else if (rightPsi > targetRightPsi + HYSTERESIS) {
-          digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-          digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_ON);
-        } else {
-          digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-          digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+      if (rightPsi >= 0 && rightState != IDLE) {
+        if (rightState == FILLING) {
+          if (rightPsi >= targetRightPsi) {
+            rightState = IDLE;
+            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+          } else {
+            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_ON);
+            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+          }
+        } else if (rightState == DEFLATING) {
+          if (rightPsi <= targetRightPsi) {
+            rightState = IDLE;
+            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+          } else {
+            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
+            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_ON);
+          }
         }
       } else {
-        // No sensor - ensure solenoids are off
+        // No sensor or target reached - ensure solenoids are off
         digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
         digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
       }
@@ -422,6 +466,8 @@ void loop() {
       // Initialize targets to 0 when newly connected
       targetLeftPsi = 0;
       targetRightPsi = 0;
+      leftState = IDLE;
+      rightState = IDLE;
   }
 
   // --- 3. GRAPH STREAMING ---
