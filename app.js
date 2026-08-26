@@ -279,11 +279,19 @@ async function sendTimeAndRequestSync() {
   try {
     await graphCharacteristic.writeValue(encoder.encode("TIME:" + currentEpoch));
     setTimeout(async () => {
-      await graphCharacteristic.writeValue(encoder.encode("GET"));
+      // fw >= 2.1.1 supports incremental sync — only rows we don't have yet
+      const cmd = supportsIncrementalSync() && historyData.length
+        ? "GET:" + Math.floor(historyData[historyData.length - 1].t / 1000)
+        : "GET";
+      await graphCharacteristic.writeValue(encoder.encode(cmd));
     }, 500); // Give ESP32 a moment to process the time setting
   } catch(e) {
     console.error("Time sync failed", e);
   }
+}
+
+function supportsIncrementalSync() {
+  return !!deviceFwVersion && !isNewerVersion('2.1.1', deviceFwVersion);
 }
 
 function onDisconnected() {
@@ -861,14 +869,46 @@ ui.btnRescue.addEventListener('click', async () => {
   }
 });
 
-// -- GRAPH LOGIC --
+// -- GRAPH DATA --
+// The phone is the long-term archive: synced rows merge into localStorage
+// (deduped by timestamp) and the device only streams what's new.
 let graphBuffer = "";
-let chartInstance = null;
+let historyData = []; // [{t(ms), l, r, tk, sl, sr}] sorted by t
+const HISTORY_KEEP_MS = 45 * 24 * 3600 * 1000; // ~6 weeks fits localStorage
+
+function parseCsvRows(csvStr) {
+  const rows = [];
+  for (const line of (csvStr || "").split('\n')) {
+    const parts = line.trim().split(',');
+    if (parts.length < 4) continue;
+    const t = parseInt(parts[0]) * 1000;
+    if (!isFinite(t) || t <= 0) continue;
+    rows.push({
+      t,
+      l: parseInt(parts[1]),
+      r: parseInt(parts[2]),
+      tk: parseInt(parts[3]),
+      sl: parts.length >= 6 ? parseInt(parts[4]) : null,
+      sr: parts.length >= 6 ? parseInt(parts[5]) : null
+    });
+  }
+  return rows;
+}
+
+function loadHistory() {
+  try {
+    historyData = parseCsvRows(localStorage.getItem('pressureHistory'));
+    historyData.sort((a, b) => a.t - b.t);
+  } catch(e) {
+    historyData = [];
+  }
+}
+loadHistory();
 
 function handleGraphData(event) {
   const decoder = new TextDecoder('utf-8');
   let chunk = decoder.decode(event.target.value);
-  
+
   if (chunk === "END") {
     console.log("Graph sync complete");
     parseAndSaveGraphData(graphBuffer);
@@ -879,74 +919,459 @@ function handleGraphData(event) {
 }
 
 function parseAndSaveGraphData(csvStr) {
-  if (!csvStr) return;
-  localStorage.setItem('pressureHistory', csvStr);
+  const incoming = parseCsvRows(csvStr);
+  if (!incoming.length) return;
+
+  const byTime = new Map(historyData.map(p => [p.t, p]));
+  incoming.forEach(p => byTime.set(p.t, p));
+  historyData = [...byTime.values()].sort((a, b) => a.t - b.t);
+
+  const cutoff = Date.now() - HISTORY_KEEP_MS;
+  if (historyData.length && historyData[0].t < cutoff) {
+    historyData = historyData.filter(p => p.t >= cutoff);
+  }
+
+  try {
+    localStorage.setItem('pressureHistory', historyData.map(p =>
+      `${Math.floor(p.t / 1000)},${p.l},${p.r},${p.tk},${p.sl == null ? '' : p.sl + ',' + p.sr}`
+        .replace(/,$/, '')
+    ).join('\n'));
+  } catch(e) {
+    console.warn("Could not persist history", e);
+  }
+
+  if (ui.graphModal.style.display === "block") {
+    graphScheduleDraw();
+  }
 }
 
-function renderChart() {
-  const csvStr = localStorage.getItem('pressureHistory');
-  if (!csvStr) {
-     alert("No graph data available yet. Please wait for a sync.");
-     return;
+// -- GRAPH RENDERER --
+// Custom canvas chart: drag to pan, pinch/scroll to zoom (time axis),
+// pressure axis auto-fits the visible window, tap for a value readout.
+const GRAPH_SERIES = [
+  { key: 'l',  label: 'Left',  color: '#2fa84f', dash: [] },
+  { key: 'r',  label: 'Right', color: '#dc55a8', dash: [] },
+  { key: 'tk', label: 'Tank',  color: '#3b82f6', dash: [] },
+  { key: 'sl', label: 'Set L', color: '#2fa84f', dash: [6, 4] },
+  { key: 'sr', label: 'Set R', color: '#dc55a8', dash: [6, 4] }
+];
+const GRAPH_GAP_MS = 5 * 60 * 1000;   // break the line across logging gaps
+const GRAPH_MIN_SPAN = 2 * 60 * 1000; // max zoom-in: 2 minutes
+const GRAPH_MARGIN = { l: 38, r: 14, t: 10, b: 26 };
+
+const graph = {
+  canvas: null, ctx: null,
+  view: { start: 0, end: 0 },
+  hidden: {},
+  cursorT: null,
+  pointers: new Map(),
+  pinchStart: null,
+  dragMoved: false,
+  raf: 0,
+  legendBuilt: false
+};
+
+function graphExtent() {
+  if (!historyData.length) return null;
+  return { start: historyData[0].t, end: historyData[historyData.length - 1].t };
+}
+
+function graphClampView() {
+  const ext = graphExtent();
+  if (!ext) return;
+  const extSpan = Math.max(ext.end - ext.start, GRAPH_MIN_SPAN);
+  const pad = extSpan * 0.02;
+  let span = graph.view.end - graph.view.start;
+  span = Math.max(GRAPH_MIN_SPAN, Math.min(span, extSpan + 2 * pad));
+  if (graph.view.start < ext.start - pad) graph.view.start = ext.start - pad;
+  if (graph.view.start + span > ext.end + pad) graph.view.start = ext.end + pad - span;
+  graph.view.end = graph.view.start + span;
+}
+
+function graphSetRange(rangeSeconds) {
+  const ext = graphExtent();
+  if (!ext) return;
+  if (rangeSeconds === "all") {
+    graph.view.start = ext.start;
+    graph.view.end = Math.max(ext.end, ext.start + GRAPH_MIN_SPAN);
+  } else {
+    graph.view.end = ext.end;
+    graph.view.start = ext.end - rangeSeconds * 1000;
   }
-  
-  const lines = csvStr.trim().split('\n');
-  const labels = [];
-  const leftData = [];
-  const rightData = [];
-  const tankData = [];
-  const targetLeftData = [];
-  const targetRightData = [];
-  
-  lines.forEach(line => {
-     const parts = line.split(',');
-     if(parts.length >= 4) {
-        const date = new Date(parseInt(parts[0]) * 1000);
-        const timeStr = date.getHours().toString().padStart(2, '0') + ':' + date.getMinutes().toString().padStart(2, '0');
-        labels.push(timeStr);
-        leftData.push(parseInt(parts[1]));
-        rightData.push(parseInt(parts[2]));
-        tankData.push(parseInt(parts[3]));
-        if (parts.length >= 6) {
-           targetLeftData.push(parseInt(parts[4]));
-           targetRightData.push(parseInt(parts[5]));
-        } else {
-           targetLeftData.push(null);
-           targetRightData.push(null);
+  graphClampView();
+  graphScheduleDraw();
+}
+
+function graphScheduleDraw() {
+  if (graph.raf) return;
+  graph.raf = requestAnimationFrame(() => {
+    graph.raf = 0;
+    drawGraph();
+  });
+}
+
+function lowerBound(arr, t) {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (arr[m].t < t) lo = m + 1; else hi = m;
+  }
+  return lo;
+}
+
+function niceStep(rough, steps) {
+  for (const s of steps) if (s >= rough) return s;
+  return steps[steps.length - 1];
+}
+
+function fmtTick(t, stepMs) {
+  const d = new Date(t);
+  const hm = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+  if (stepMs >= 86400000) return (d.getMonth() + 1) + '/' + d.getDate();
+  return hm;
+}
+
+function fmtTipTime(t) {
+  const d = new Date(t);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${months[d.getMonth()]} ${d.getDate()}, ` +
+    d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+}
+
+function drawGraph() {
+  const canvas = graph.canvas, ctx = graph.ctx;
+  if (!canvas) return;
+  const wrap = document.getElementById('graph-wrap');
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = wrap.clientWidth, cssH = wrap.clientHeight;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  ctx.font = '10px Roboto, sans-serif';
+
+  if (!historyData.length) {
+    ctx.fillStyle = '#888';
+    ctx.textAlign = 'center';
+    ctx.fillText('No history yet — connect to the truck to sync.', cssW / 2, cssH / 2);
+    return;
+  }
+
+  graphClampView();
+  const { start, end } = graph.view;
+  const plotX = GRAPH_MARGIN.l, plotY = GRAPH_MARGIN.t;
+  const plotW = cssW - GRAPH_MARGIN.l - GRAPH_MARGIN.r;
+  const plotH = cssH - GRAPH_MARGIN.t - GRAPH_MARGIN.b;
+  const xOf = t => plotX + ((t - start) / (end - start)) * plotW;
+
+  // Visible slice (one point of margin each side so lines run off-screen)
+  const i0 = Math.max(0, lowerBound(historyData, start) - 1);
+  const i1 = Math.min(historyData.length, lowerBound(historyData, end) + 1);
+
+  // Y range from the visible, non-hidden series
+  let yMin = Infinity, yMax = -Infinity;
+  for (let i = i0; i < i1; i++) {
+    const p = historyData[i];
+    for (const s of GRAPH_SERIES) {
+      if (graph.hidden[s.key]) continue;
+      const v = p[s.key];
+      if (v == null || !isFinite(v)) continue;
+      if (v < yMin) yMin = v;
+      if (v > yMax) yMax = v;
+    }
+  }
+  if (!isFinite(yMin)) { yMin = 0; yMax = 100; }
+  if (yMax - yMin < 4) { yMax += 2; yMin = Math.max(0, yMin - 2); }
+  const yPad = (yMax - yMin) * 0.1;
+  yMin = Math.max(0, yMin - yPad);
+  yMax = yMax + yPad;
+  const yOf = v => plotY + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  // Y grid + labels (recessive)
+  const yStep = niceStep((yMax - yMin) / 4, [1, 2, 5, 10, 20, 25, 50, 100]);
+  ctx.strokeStyle = '#2a2a2a';
+  ctx.fillStyle = '#888';
+  ctx.lineWidth = 1;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let v = Math.ceil(yMin / yStep) * yStep; v <= yMax; v += yStep) {
+    const y = yOf(v);
+    ctx.beginPath();
+    ctx.moveTo(plotX, y);
+    ctx.lineTo(plotX + plotW, y);
+    ctx.stroke();
+    ctx.fillText(String(v), plotX - 5, y);
+  }
+
+  // X ticks: pick a step giving ~4-6 labels
+  const spanS = (end - start) / 1000;
+  const xStepS = niceStep(spanS / 5,
+    [60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800]);
+  const xStepMs = xStepS * 1000;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let t = Math.ceil(start / xStepMs) * xStepMs; t <= end; t += xStepMs) {
+    const x = xOf(t);
+    ctx.strokeStyle = '#242424';
+    ctx.beginPath();
+    ctx.moveTo(x, plotY);
+    ctx.lineTo(x, plotY + plotH);
+    ctx.stroke();
+    ctx.fillStyle = '#888';
+    ctx.fillText(fmtTick(t, xStepMs), x, plotY + plotH + 6);
+  }
+
+  // Series lines, decimated to ~2 points per pixel, broken at gaps
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotX, plotY, plotW, plotH);
+  ctx.clip();
+  const maxPts = plotW * 2;
+  const labelSpots = [];
+  for (const s of GRAPH_SERIES) {
+    if (graph.hidden[s.key]) continue;
+    const pts = [];
+    for (let i = i0; i < i1; i++) {
+      const v = historyData[i][s.key];
+      if (v == null || !isFinite(v)) { pts.push(null); continue; }
+      pts.push({ t: historyData[i].t, v });
+    }
+    // decimate by stride-averaging
+    let drawPts = pts;
+    const realCount = pts.filter(Boolean).length;
+    if (realCount > maxPts) {
+      const stride = Math.ceil(realCount / maxPts);
+      drawPts = [];
+      let bucket = [];
+      for (const p of pts) {
+        if (!p) {
+          if (bucket.length) { drawPts.push(avgPoint(bucket)); bucket = []; }
+          drawPts.push(null);
+          continue;
         }
-     }
+        bucket.push(p);
+        if (bucket.length >= stride) { drawPts.push(avgPoint(bucket)); bucket = []; }
+      }
+      if (bucket.length) drawPts.push(avgPoint(bucket));
+    }
+
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.setLineDash(s.dash);
+    ctx.beginPath();
+    let pen = false, lastT = 0, lastPt = null;
+    for (const p of drawPts) {
+      if (!p) { pen = false; continue; }
+      if (pen && p.t - lastT > GRAPH_GAP_MS) pen = false;
+      const x = xOf(p.t), y = yOf(p.v);
+      if (!pen) { ctx.moveTo(x, y); pen = true; } else { ctx.lineTo(x, y); }
+      lastT = p.t;
+      lastPt = p;
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (lastPt && !s.dash.length) labelSpots.push({ label: s.label, y: yOf(lastPt.v) });
+  }
+  ctx.restore();
+
+  // Direct labels for the solid series at the right edge (ink text, nudged apart)
+  labelSpots.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < labelSpots.length; i++) {
+    if (labelSpots[i].y - labelSpots[i - 1].y < 12) labelSpots[i].y = labelSpots[i - 1].y + 12;
+  }
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = '#ddd';
+  for (const spot of labelSpots) {
+    ctx.fillText(spot.label, plotX + plotW - 3, Math.max(plotY + 10, Math.min(spot.y - 3, plotY + plotH - 2)));
+  }
+
+  drawGraphCursor(xOf, yOf, plotX, plotY, plotW, plotH);
+}
+
+function avgPoint(bucket) {
+  let st = 0, sv = 0;
+  for (const p of bucket) { st += p.t; sv += p.v; }
+  return { t: st / bucket.length, v: sv / bucket.length };
+}
+
+function drawGraphCursor(xOf, yOf, plotX, plotY, plotW, plotH) {
+  const tip = document.getElementById('graph-tip');
+  if (graph.cursorT == null || !historyData.length) { tip.style.display = 'none'; return; }
+  const { start, end } = graph.view;
+  if (graph.cursorT < start || graph.cursorT > end) { tip.style.display = 'none'; return; }
+
+  // nearest sample
+  let idx = lowerBound(historyData, graph.cursorT);
+  if (idx > 0 && (idx >= historyData.length ||
+      graph.cursorT - historyData[idx - 1].t < historyData[idx].t - graph.cursorT)) idx--;
+  const p = historyData[idx];
+  const ctx = graph.ctx;
+  const x = xOf(p.t);
+  if (x < plotX || x > plotX + plotW) { tip.style.display = 'none'; return; }
+
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x, plotY);
+  ctx.lineTo(x, plotY + plotH);
+  ctx.stroke();
+
+  let html = `<div class="tip-time">${fmtTipTime(p.t)}</div>`;
+  for (const s of GRAPH_SERIES) {
+    if (graph.hidden[s.key]) continue;
+    const v = p[s.key];
+    if (v == null || !isFinite(v)) continue;
+    ctx.fillStyle = s.color;
+    ctx.beginPath();
+    ctx.arc(x, yOf(v), 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    html += `<div class="tip-row"><span class="tip-dot" style="background:${s.color}"></span>${s.label}: ${v} PSI</div>`;
+  }
+  tip.innerHTML = html;
+  tip.style.display = 'block';
+  const wrapW = document.getElementById('graph-wrap').clientWidth;
+  const tipW = tip.offsetWidth;
+  let left = x + 12;
+  if (left + tipW > wrapW - 4) left = x - tipW - 12;
+  tip.style.left = Math.max(4, left) + 'px';
+}
+
+function graphClearActiveRange() {
+  document.querySelectorAll('#graph-ranges .range-btn').forEach(b => b.classList.remove('active'));
+}
+
+function graphXToTime(clientX) {
+  const rect = graph.canvas.getBoundingClientRect();
+  const frac = (clientX - rect.left - GRAPH_MARGIN.l) / (rect.width - GRAPH_MARGIN.l - GRAPH_MARGIN.r);
+  return graph.view.start + frac * (graph.view.end - graph.view.start);
+}
+
+function graphZoomAt(t, factor) {
+  const span = (graph.view.end - graph.view.start) * factor;
+  const frac = (t - graph.view.start) / (graph.view.end - graph.view.start);
+  graph.view.start = t - span * frac;
+  graph.view.end = graph.view.start + span;
+  graphClearActiveRange();
+  graphClampView();
+  graphScheduleDraw();
+}
+
+function initGraph() {
+  if (graph.canvas) return;
+  graph.canvas = document.getElementById('pressureChart');
+  graph.ctx = graph.canvas.getContext('2d');
+  const canvas = graph.canvas;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    graph.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, startX: e.clientX });
+    graph.dragMoved = false;
+    if (graph.pointers.size === 2) {
+      const [a, b] = [...graph.pointers.values()];
+      graph.pinchStart = {
+        dist: Math.abs(a.x - b.x) || 1,
+        span: graph.view.end - graph.view.start,
+        midT: graphXToTime((a.x + b.x) / 2)
+      };
+    }
   });
 
-  const ctx = document.getElementById('pressureChart').getContext('2d');
-  if (chartInstance) {
-     chartInstance.destroy();
+  canvas.addEventListener('pointermove', (e) => {
+    const ptr = graph.pointers.get(e.pointerId);
+    if (!ptr) return;
+    const dx = e.clientX - ptr.x;
+    ptr.x = e.clientX; ptr.y = e.clientY;
+    if (Math.abs(e.clientX - ptr.startX) > 6) graph.dragMoved = true;
+
+    if (graph.pointers.size === 2 && graph.pinchStart) {
+      graph.dragMoved = true;
+      const [a, b] = [...graph.pointers.values()];
+      const dist = Math.abs(a.x - b.x) || 1;
+      const span = Math.max(GRAPH_MIN_SPAN, graph.pinchStart.span * graph.pinchStart.dist / dist);
+      const rect = canvas.getBoundingClientRect();
+      const midFrac = ((a.x + b.x) / 2 - rect.left - GRAPH_MARGIN.l) /
+                      (rect.width - GRAPH_MARGIN.l - GRAPH_MARGIN.r);
+      graph.view.start = graph.pinchStart.midT - span * midFrac;
+      graph.view.end = graph.view.start + span;
+      graphClearActiveRange();
+      graphClampView();
+      graphScheduleDraw();
+    } else if (graph.pointers.size === 1 && dx !== 0) {
+      const rect = canvas.getBoundingClientRect();
+      const dt = dx / (rect.width - GRAPH_MARGIN.l - GRAPH_MARGIN.r) * (graph.view.end - graph.view.start);
+      graph.view.start -= dt;
+      graph.view.end -= dt;
+      if (graph.dragMoved) graphClearActiveRange();
+      graphClampView();
+      graphScheduleDraw();
+    }
+  });
+
+  const endPointer = (e) => {
+    const wasTap = graph.pointers.size === 1 && !graph.dragMoved && graph.pinchStart == null;
+    graph.pointers.delete(e.pointerId);
+    if (graph.pointers.size < 2) graph.pinchStart = null;
+    if (wasTap) {
+      const t = graphXToTime(e.clientX);
+      graph.cursorT = (graph.cursorT != null && Math.abs(t - graph.cursorT) < (graph.view.end - graph.view.start) * 0.02)
+        ? null : t;
+      graphScheduleDraw();
+    }
+  };
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', (e) => { graph.pointers.delete(e.pointerId); graph.pinchStart = null; });
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    graphZoomAt(graphXToTime(e.clientX), e.deltaY > 0 ? 1.25 : 0.8);
+  }, { passive: false });
+
+  document.querySelectorAll('#graph-ranges .range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      graphClearActiveRange();
+      btn.classList.add('active');
+      graph.cursorT = null;
+      graphSetRange(btn.dataset.range === 'all' ? 'all' : parseInt(btn.dataset.range));
+    });
+  });
+
+  // Legend chips toggle series visibility
+  const legend = document.getElementById('graph-legend');
+  for (const s of GRAPH_SERIES) {
+    const chip = document.createElement('button');
+    chip.className = 'legend-chip';
+    chip.innerHTML = `<span class="legend-swatch${s.dash.length ? ' dashed' : ''}" style="border-top-color:${s.color}"></span>${s.label}`;
+    chip.addEventListener('click', () => {
+      graph.hidden[s.key] = !graph.hidden[s.key];
+      chip.classList.toggle('off', !!graph.hidden[s.key]);
+      graphScheduleDraw();
+    });
+    legend.appendChild(chip);
   }
-  
-  chartInstance = new Chart(ctx, {
-      type: 'line',
-      data: {
-          labels: labels,
-          datasets: [
-              { label: 'Left', data: leftData, borderColor: '#34c759', backgroundColor: 'rgba(52, 199, 89, 0.1)', tension: 0.2, fill: true },
-              { label: 'Right', data: rightData, borderColor: '#ff3b30', backgroundColor: 'rgba(255, 59, 48, 0.1)', tension: 0.2, fill: true },
-              { label: 'Tank', data: tankData, borderColor: '#007aff', backgroundColor: 'rgba(0, 122, 255, 0.1)', tension: 0.2, fill: true },
-              { label: 'Set Left', data: targetLeftData, borderColor: '#34c759', borderDash: [5, 5], backgroundColor: 'transparent', tension: 0.2, fill: false },
-              { label: 'Set Right', data: targetRightData, borderColor: '#ff3b30', borderDash: [5, 5], backgroundColor: 'transparent', tension: 0.2, fill: false }
-          ]
-      },
-      options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          scales: {
-              y: { beginAtZero: true, suggestedMax: 150 }
-          }
-      }
+
+  window.addEventListener('resize', () => {
+    if (ui.graphModal.style.display === "block") graphScheduleDraw();
   });
 }
 
 ui.btnGraph.addEventListener('click', () => {
-   renderChart();
-   ui.graphModal.style.display = "block";
+  initGraph();
+  loadHistory();
+  ui.graphModal.style.display = "block";
+  graph.cursorT = null;
+  const ext = graphExtent();
+  graphClearActiveRange();
+  if (ext && ext.end - ext.start > 86400000) {
+    document.querySelector('#graph-ranges .range-btn[data-range="86400"]').classList.add('active');
+    graphSetRange(86400);
+  } else {
+    document.querySelector('#graph-ranges .range-btn[data-range="all"]').classList.add('active');
+    graphSetRange('all');
+  }
 });
 
 ui.btnCloseGraph.addEventListener('click', () => {

@@ -11,7 +11,6 @@
 
   <link rel="stylesheet" href="style.css">
   <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <div class="app-container">
@@ -119,12 +118,22 @@
 
     <!-- GRAPH MODAL -->
     <div id="graph-modal" class="modal">
-      <div class="modal-content">
+      <div class="modal-content dark graph-content">
         <span class="close-btn" id="btn-close-graph">&times;</span>
-        <h2 style="color: black; margin-top: 0;">Pressure History</h2>
-        <div style="position: relative; height: 60vh; width: 100%;">
-          <canvas id="pressureChart"></canvas>
+        <h2 style="margin-top: 0;">Pressure History</h2>
+        <div class="graph-ranges" id="graph-ranges">
+          <button class="range-btn" data-range="3600">1H</button>
+          <button class="range-btn" data-range="21600">6H</button>
+          <button class="range-btn active" data-range="86400">24H</button>
+          <button class="range-btn" data-range="604800">7D</button>
+          <button class="range-btn" data-range="all">ALL</button>
         </div>
+        <div class="graph-legend" id="graph-legend"></div>
+        <div class="graph-wrap" id="graph-wrap">
+          <canvas id="pressureChart"></canvas>
+          <div id="graph-tip" class="graph-tip" style="display: none;"></div>
+        </div>
+        <div class="graph-hint">Drag to pan &middot; pinch or scroll to zoom &middot; tap for values</div>
       </div>
     </div>
   </div>

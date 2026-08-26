@@ -21,7 +21,7 @@
 #include <Preferences.h>
 #include <Update.h>
 
-#define FW_VERSION "2.1.0"
+#define FW_VERSION "2.1.1"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -103,6 +103,11 @@ bool timeSet = false;
 bool isStreamingGraph = false;
 File streamingFile;
 unsigned long lastLogUpdate = 0;
+unsigned long graphSinceEpoch = 0;  // GET:<epoch> — stream only newer rows
+String graphPendingLine = "";
+// The phone keeps the long-term archive; the on-device file is a rolling
+// buffer, wiped when it gets big so LittleFS never fills up.
+const size_t HISTORY_MAX_BYTES = 300 * 1024;
 
 // ---- PIN DEFINITIONS (ESP32-S3) ----
 const int LEFT_AIR_IN_PIN  = 2;
@@ -522,7 +527,14 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
          Serial.println(bootTimestamp);
       }
       else if (rxValue.startsWith("GET")) {
-         Serial.println("App requested graph data.");
+         // "GET" streams everything; "GET:<epoch>" only rows newer than epoch
+         graphSinceEpoch = 0;
+         if (rxValue.startsWith("GET:")) {
+           graphSinceEpoch = strtoul(rxValue.c_str() + 4, NULL, 10);
+         }
+         Serial.print("App requested graph data since ");
+         Serial.println(graphSinceEpoch);
+         graphPendingLine = "";
          isStreamingGraph = true;
          streamingFile = LittleFS.open("/history.csv", FILE_READ);
       }
@@ -836,21 +848,33 @@ void loop() {
       rightState = IDLE;
   }
 
-  // --- 3. GRAPH STREAMING ---
+  // --- 3. GRAPH STREAMING (line-based so rows can be filtered by epoch) ---
   if (isStreamingGraph && !fwReceiving) {
-    if (streamingFile && streamingFile.available()) {
-        char chunk[200];
-        int bytesRead = streamingFile.readBytes(chunk, 199);
-        chunk[bytesRead] = 0;
-        pCharGraph->setValue((uint8_t*)chunk, bytesRead);
-        pCharGraph->notify();
-        delay(20);
+    String pkt = graphPendingLine;
+    graphPendingLine = "";
+    while (streamingFile && streamingFile.available() && pkt.length() < 160) {
+      String line = streamingFile.readStringUntil('\n');
+      line.trim();
+      if (line.length() == 0) continue;
+      if (strtoul(line.c_str(), NULL, 10) <= graphSinceEpoch) continue;
+      line += "\n";
+      if (pkt.length() + line.length() > 190) {
+        graphPendingLine = line; // doesn't fit — goes in the next packet
+        break;
+      }
+      pkt += line;
+    }
+
+    if (pkt.length() > 0) {
+      pCharGraph->setValue((uint8_t*)pkt.c_str(), pkt.length());
+      pCharGraph->notify();
+      delay(20);
     } else {
-        isStreamingGraph = false;
-        if (streamingFile) streamingFile.close();
-        pCharGraph->setValue("END");
-        pCharGraph->notify();
-        Serial.println("Finished streaming graph data.");
+      isStreamingGraph = false;
+      if (streamingFile) streamingFile.close();
+      pCharGraph->setValue("END");
+      pCharGraph->notify();
+      Serial.println("Finished streaming graph data.");
     }
   }
 
@@ -858,6 +882,21 @@ void loop() {
   if (timeSet && !fwReceiving && millis() - lastLogUpdate > 60000) {
     lastLogUpdate = millis();
     unsigned long currentEpoch = bootTimestamp + (millis() / 1000);
+
+    // Rolling buffer: the app archives on every connect, so once the file
+    // gets big just start fresh instead of filling LittleFS
+    if (!isStreamingGraph) {
+      File check = LittleFS.open("/history.csv", FILE_READ);
+      if (check) {
+        size_t sz = check.size();
+        check.close();
+        if (sz > HISTORY_MAX_BYTES) {
+          LittleFS.remove("/history.csv");
+          Serial.println("History buffer full — starting a fresh file.");
+        }
+      }
+    }
+
     File file = LittleFS.open("/history.csv", FILE_APPEND);
     if (file) {
         char logStr[80];
