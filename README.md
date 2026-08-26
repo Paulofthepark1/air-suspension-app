@@ -71,3 +71,15 @@ default 4MB partition scheme.
 | `OTA:1` | Rescue mode: join Wi-Fi, open ArduinoOTA IDE port for 5 min |
 | `MODE:TOW` / `MODE:DAILY` | Switch drive mode (persisted) |
 | `DTGT:<psi>` | Set the DAILY hold target, 5–50 (persisted) |
+| `GET` / `GET:<epoch>` | (graph char) Stream history CSV; with epoch, only newer rows |
+
+## Pressure history
+
+The controller logs one CSV row per minute to LittleFS and streams it over
+the graph characteristic on connect. From fw 2.1.1 the app syncs
+incrementally (`GET:<last epoch>`) and keeps ~6 weeks of merged history in
+localStorage as the archive; the on-device file is a rolling buffer wiped
+past ~300KB. The in-app graph is a dependency-free canvas renderer:
+drag to pan, pinch/scroll to zoom the time axis (the PSI axis auto-fits
+the visible window), quick ranges (1H/6H/24H/7D/ALL), tap for a crosshair
+readout, and legend chips to toggle series.
