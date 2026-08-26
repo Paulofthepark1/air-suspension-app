@@ -50,7 +50,7 @@ default 4MB partition scheme.
 
 | Command | Effect |
 |---|---|
-| `SET:<left>:<right>` | Set target PSI and start the control loop |
+| `SET:<left>:<right>` | Set target PSI and start the control loop; `-` for either side leaves it untouched (per-side set, fw ≥ 2.0.1) |
 | `DUMP:1` / `DUMP:0` | Open/close the tank dump valve |
 | `WIFI:<ssid>\n<pass>` | Save Wi-Fi credentials to flash (rescue mode only) |
 | `FWBEGIN:<size>:<md5>` / chunks / `FWEND` / `FWABORT` | BLE firmware update |

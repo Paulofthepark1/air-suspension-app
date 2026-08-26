@@ -44,6 +44,8 @@ const ui = {
   status: document.getElementById('ble-status'),
   btnConnect: document.getElementById('btn-connect'),
   btnStart: document.getElementById('btn-start'),
+  btnSetLeft: document.getElementById('btn-set-left'),
+  btnSetRight: document.getElementById('btn-set-right'),
   btnSync: document.getElementById('btn-sync'),
   
   targetLeft: document.getElementById('target-left'),
@@ -229,11 +231,14 @@ function onConnected() {
   ui.btnConnect.classList.add('connected');
   ui.btnConnect.innerText = 'DISCONNECT';
   ui.btnStart.classList.remove('disabled');
+  ui.btnSetLeft.classList.remove('disabled');
+  ui.btnSetRight.classList.remove('disabled');
   ui.btnGraph.style.display = 'inline-block';
   ui.btnOta.style.display = 'inline-block';
   ui.btnWifi.style.display = 'inline-block';
   updateInProgress = false;
 
+  updateSetButtonsLayout();
   updateFirmwareUI();
   checkLatestFirmware();
   sendTimeAndRequestSync();
@@ -262,12 +267,15 @@ function onDisconnected() {
   ui.btnConnect.classList.remove('connected');
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
+  ui.btnSetLeft.classList.add('disabled');
+  ui.btnSetRight.classList.add('disabled');
   ui.btnGraph.style.display = 'none';
   ui.btnOta.style.display = 'none';
   ui.btnWifi.style.display = 'none';
   cmdCharacteristic = null;
   graphCharacteristic = null;
   otaStatusCharacteristic = null;
+  updateSetButtonsLayout();
   // Make targets modified again so user knows to hit SET
   appliedLeft = -1;
   appliedRight = -1;
@@ -310,14 +318,30 @@ ui.btnSync.addEventListener('click', () => {
   localStorage.setItem('isSyncOn', isSyncOn);
   ui.btnSync.innerText = isSyncOn ? "SYNC: ON" : "SYNC: OFF";
   ui.btnSync.classList.toggle('active', isSyncOn);
-  
+
   if (isSyncOn) {
     // When sync turns on, match right to left by default
     targetRight = targetLeft;
     localStorage.setItem('targetRight', targetRight);
-    updateDisplay();
   }
+  updateSetButtonsLayout();
+  updateDisplay();
 });
+
+// Per-side SET needs firmware ≥ 2.0.1 (the "-" placeholder in SET:L:R);
+// on older firmware "-" would parse as 0 and dump that side
+function supportsPerSideSet() {
+  return !!deviceFwVersion && !isNewerVersion('2.0.1', deviceFwVersion);
+}
+
+// Sync ON (or firmware without per-side support): one central SET.
+// Sync OFF on v2.0.1+: a SET under each side instead.
+function updateSetButtonsLayout() {
+  const perSide = !isSyncOn && supportsPerSideSet() && cmdCharacteristic;
+  ui.btnStart.style.display = perSide ? 'none' : 'inline-block';
+  ui.btnSetLeft.style.display = perSide ? 'inline-block' : 'none';
+  ui.btnSetRight.style.display = perSide ? 'inline-block' : 'none';
+}
 
 // Run once on load to show saved values
 updateDisplay();
@@ -343,6 +367,9 @@ function updateDisplay() {
   } else {
     ui.btnStart.classList.add('modified');
   }
+
+  ui.btnSetLeft.classList.toggle('modified', targetLeft !== appliedLeft);
+  ui.btnSetRight.classList.toggle('modified', targetRight !== appliedRight);
 }
 
 function adjustTarget(side, amount) {
@@ -384,27 +411,43 @@ Object.keys(btnMap).forEach(id => {
 });
 
 // -- SEND COMMAND --
-ui.btnStart.addEventListener('click', async () => {
-  if (!cmdCharacteristic) return;
-  
-  // Example "SET:80:85"
-  const cmdStr = `SET:${targetLeft}:${targetRight}`;
+async function sendSetCommand(cmdStr, btn) {
   console.log("Sending command:", cmdStr);
-  
   try {
     const encoder = new TextEncoder('utf-8');
     await cmdCharacteristic.writeValue(encoder.encode(cmdStr));
-    
-    // Re-sync applied targets
+    btn.innerText = "DONE!";
+    setTimeout(() => { btn.innerText = "SET"; }, 1500);
+    return true;
+  } catch(e) {
+    console.error("Write error", e);
+    return false;
+  }
+}
+
+ui.btnStart.addEventListener('click', async () => {
+  if (!cmdCharacteristic) return;
+  if (await sendSetCommand(`SET:${targetLeft}:${targetRight}`, ui.btnStart)) {
     appliedLeft = targetLeft;
     appliedRight = targetRight;
     updateDisplay();
-    
-    // Add visual feedback to button
-    ui.btnStart.innerText = "DONE!";
-    setTimeout(() => { ui.btnStart.innerText = "SET"; }, 1500);
-  } catch(e) {
-    console.error("Write error", e);
+  }
+});
+
+// Per-side SET (sync off, firmware ≥ 2.0.1): "-" leaves the other side alone
+ui.btnSetLeft.addEventListener('click', async () => {
+  if (!cmdCharacteristic || !supportsPerSideSet()) return;
+  if (await sendSetCommand(`SET:${targetLeft}:-`, ui.btnSetLeft)) {
+    appliedLeft = targetLeft;
+    updateDisplay();
+  }
+});
+
+ui.btnSetRight.addEventListener('click', async () => {
+  if (!cmdCharacteristic || !supportsPerSideSet()) return;
+  if (await sendSetCommand(`SET:-:${targetRight}`, ui.btnSetRight)) {
+    appliedRight = targetRight;
+    updateDisplay();
   }
 });
 
