@@ -46,6 +46,20 @@ the Arduino IDE.
 CI fails the build if the binary exceeds the 1280KB OTA app slot of the
 default 4MB partition scheme.
 
+## Drive modes (fw ≥ 2.1.0)
+
+- **TOW** — manual control: set left/right pressures with SET (original
+  behavior). Solenoids stop on BLE disconnect.
+- **DAILY** — the controller autonomously holds both bags at a target
+  (default 10 PSI, adjustable 5–30 in the app) with or without a phone
+  connected, persisting across reboots. Refills at target−2 or below the
+  5 PSI floor, deflates above target+3, and only opens a fill valve when
+  the tank is at least 3 PSI above the target. Fill attempts are capped
+  at 30s with a 45s cooldown so a burst line can't drain the tank. Status
+  is published on the mode characteristic (`D:<OK|FILL|DEFL|LOWTANK|LOWBAGS>:<target>`);
+  the app shows warnings and raises a system notification when the tank
+  is too low to fill (compressor off) or bags drop under 5 PSI unfillable.
+
 ### BLE command reference
 
 | Command | Effect |
@@ -55,3 +69,5 @@ default 4MB partition scheme.
 | `WIFI:<ssid>\n<pass>` | Save Wi-Fi credentials to flash (rescue mode only) |
 | `FWBEGIN:<size>:<md5>` / chunks / `FWEND` / `FWABORT` | BLE firmware update |
 | `OTA:1` | Rescue mode: join Wi-Fi, open ArduinoOTA IDE port for 5 min |
+| `MODE:TOW` / `MODE:DAILY` | Switch drive mode (persisted) |
+| `DTGT:<psi>` | Set the DAILY hold target, 5–50 (persisted) |

@@ -20,7 +20,9 @@
       <div id="fw-info" class="fw-info"></div>
       <div style="margin-top: 15px;">
         <button id="btn-sync" class="sync-btn active">SYNC: ON</button>
+        <button id="btn-mode" class="sync-btn" style="display: none; margin-left: 8px;">MODE: TOW</button>
       </div>
+      <div id="mode-banner" class="mode-banner" style="display: none;"></div>
     </div>
 
     <div class="controls-container">
@@ -66,6 +68,17 @@
         </button>
         <button class="start-btn side-set-btn disabled" id="btn-set-right" style="display: none;">SET</button>
       </div>
+    </div>
+
+    <!-- DAILY MODE PANEL -->
+    <div id="daily-panel" class="daily-panel" style="display: none;">
+      <div class="tank-label">DAILY MODE &mdash; HOLDING</div>
+      <div class="daily-adjust">
+        <button id="btn-daily-minus" class="daily-adj-btn">&minus;</button>
+        <span><span id="daily-target" class="daily-target-val">10</span> <span class="tank-unit">PSI</span></span>
+        <button id="btn-daily-plus" class="daily-adj-btn">+</button>
+      </div>
+      <div id="daily-status" class="daily-status">&mdash;</div>
     </div>
 
     <!-- ACTION START BUTTON -->
