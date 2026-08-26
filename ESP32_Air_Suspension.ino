@@ -1,5 +1,11 @@
 /*
   ESP32 BLE Air Suspension Controller - TARGET MODE
+
+  Firmware updates: the app sends OTA:1 over BLE, the ESP32 joins Wi-Fi
+  (credentials provisioned over BLE, stored in NVS) and downloads the
+  latest firmware.bin from this repo's GitHub Releases, flashing itself.
+  ArduinoOTA (IDE network port) stays available as a rescue path if the
+  self-update fails.
 */
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -11,6 +17,15 @@
 #include <ESPmDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <Update.h>
+
+#define FW_VERSION "2.0.0"
+
+// Built by GitHub Actions on every merge to main (see .github/workflows/firmware.yml)
+const char* FIRMWARE_URL = "https://github.com/Paulofthepark1/air-suspension-app/releases/latest/download/firmware.bin";
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -19,16 +34,19 @@ BLECharacteristic* pCharTank = NULL;
 BLECharacteristic* pCharCmd = NULL;
 BLECharacteristic* pCharGraph = NULL;
 BLECharacteristic* pCharOtaStatus = NULL;
+BLECharacteristic* pCharVersion = NULL;
 
-const char* ssid = "frustration";
-const char* password = "summer12";
+// Wi-Fi credentials live in NVS, set from the app via WIFI: command
+Preferences prefs;
+String wifiSsid = "";
+String wifiPass = "";
 
 bool otaMode = false;
 bool otaWifiConnected = false;
 bool otaUpdateStarted = false;
+bool selfUpdateAttempted = false;
 unsigned long otaStartTime = 0;
 unsigned long otaConnectedTime = 0;
-String otaErrorMessage = "";
 
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
@@ -59,10 +77,10 @@ File streamingFile;
 unsigned long lastLogUpdate = 0;
 
 // ---- PIN DEFINITIONS (ESP32-S3) ----
-const int LEFT_AIR_IN_PIN  = 2;  
-const int LEFT_AIR_OUT_PIN = 42;  
-const int RIGHT_AIR_IN_PIN = 41; 
-const int RIGHT_AIR_OUT_PIN = 40; 
+const int LEFT_AIR_IN_PIN  = 2;
+const int LEFT_AIR_OUT_PIN = 42;
+const int RIGHT_AIR_IN_PIN = 41;
+const int RIGHT_AIR_OUT_PIN = 40;
 const int TANK_DUMP_PIN = 39;
 const int LEFT_SENSOR_PIN = 4;
 const int RIGHT_SENSOR_PIN = 5;
@@ -81,6 +99,7 @@ const int TANK_SENSOR_PIN = 6;
 #define CHAR_CMD_UUID          "beb5483e-36e3-4688-b7f5-ea07361b26a8"
 #define CHAR_GRAPH_UUID        "beb5483e-36e5-4688-b7f5-ea07361b26a8"
 #define CHAR_OTA_STATUS_UUID   "beb5483e-36e6-4688-b7f5-ea07361b26a8"
+#define CHAR_VERSION_UUID      "beb5483e-36e7-4688-b7f5-ea07361b26a8"
 
 void stopAllSolenoids() {
   digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
@@ -88,6 +107,26 @@ void stopAllSolenoids() {
   digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
   digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
   digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
+}
+
+// Persist an OTA status message so it survives the reboot after an
+// update attempt; the app reads and clears it on next connect.
+void setOtaStatus(const String& msg, bool persist) {
+  pCharOtaStatus->setValue(msg.c_str());
+  pCharOtaStatus->notify();
+  if (persist) {
+    prefs.begin("airsus", false);
+    prefs.putString("otamsg", msg);
+    prefs.end();
+  }
+  Serial.println("OTA status: " + msg);
+}
+
+void loadWifiCredentials() {
+  prefs.begin("airsus", true);
+  wifiSsid = prefs.getString("ssid", "");
+  wifiPass = prefs.getString("pass", "");
+  prefs.end();
 }
 
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -108,7 +147,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
 class MyCmdCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       String rxValue = pCharacteristic->getValue(); // Now officially String for > 3.0.0
-      
+
       // Expected format: SET:80:85  (Left:Right) or DUMP:1 / DUMP:0
       if (rxValue.startsWith("SET:")) {
         int firstColon = rxValue.indexOf(':');
@@ -121,7 +160,7 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
           targetLeftPsi = leftStr.toInt();
           targetRightPsi = rightStr.toInt();
           commandReceived = true; // NOW activate the control loop
-          
+
           if (leftPsi >= 0) {
             if (targetLeftPsi > leftPsi) leftState = FILLING;
             else if (targetLeftPsi < leftPsi) leftState = DEFLATING;
@@ -149,18 +188,38 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
       } else if (rxValue == "DUMP:0") {
         digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
         Serial.println("Stopped dumping tank.");
+      } else if (rxValue.startsWith("WIFI:")) {
+        // Format: WIFI:<ssid>\n<password>  (newline separator — not valid in either field)
+        String payload = rxValue.substring(5);
+        int sep = payload.indexOf('\n');
+        if (sep > 0) {
+          wifiSsid = payload.substring(0, sep);
+          wifiPass = payload.substring(sep + 1);
+          prefs.begin("airsus", false);
+          prefs.putString("ssid", wifiSsid);
+          prefs.putString("pass", wifiPass);
+          prefs.end();
+          setOtaStatus("Wi-Fi saved: " + wifiSsid, false);
+        } else {
+          setOtaStatus("Invalid Wi-Fi setup format.", false);
+        }
       } else if (rxValue == "OTA:1") {
-        Serial.println("OTA Update Requested. Pausing BLE and connecting to Wi-Fi...");
+        if (wifiSsid.length() == 0) {
+          setOtaStatus("No Wi-Fi credentials saved. Use Wi-Fi Setup in the app first.", false);
+          return;
+        }
+        Serial.println("OTA Update Requested. Connecting to Wi-Fi...");
         otaMode = true;
         otaWifiConnected = false;
         otaUpdateStarted = false;
+        selfUpdateAttempted = false;
         otaStartTime = millis();
         commandReceived = false;
         stopAllSolenoids();
-        
+
         // Connect to WiFi
         WiFi.mode(WIFI_STA);
-        WiFi.begin(ssid, password);
+        WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
       }
     }
 };
@@ -169,8 +228,10 @@ class MyOtaStatusCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       String rxValue = pCharacteristic->getValue();
       if (rxValue == "CLEAR") {
-        otaErrorMessage = "";
         pCharacteristic->setValue("");
+        prefs.begin("airsus", false);
+        prefs.remove("otamsg");
+        prefs.end();
       }
     }
 };
@@ -178,7 +239,7 @@ class MyOtaStatusCallbacks: public BLECharacteristicCallbacks {
 class MyGraphCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       String rxValue = pCharacteristic->getValue();
-      
+
       if (rxValue.startsWith("TIME:")) {
          unsigned long currentEpoch = rxValue.substring(5).toInt();
          bootTimestamp = currentEpoch - (millis() / 1000);
@@ -197,6 +258,89 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
       }
     }
 };
+
+// Download the latest firmware.bin from GitHub Releases and flash it.
+// Returns an error message on failure; on success the device reboots.
+String performGitHubUpdate() {
+  WiFiClientSecure client;
+  client.setInsecure(); // GitHub asset CDN rotates certs; integrity is checked by Update magic/size
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS); // releases/latest → tag → CDN
+  http.setTimeout(20000);
+
+  if (!http.begin(client, FIRMWARE_URL)) {
+    return "Could not start download.";
+  }
+
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    return "Download failed (HTTP " + String(httpCode) + "). Is a release published?";
+  }
+
+  int totalLen = http.getSize();
+  if (totalLen <= 0) {
+    http.end();
+    return "Bad firmware size from server.";
+  }
+
+  if (!Update.begin(totalLen)) {
+    http.end();
+    return String("Update.begin failed: ") + Update.errorString();
+  }
+
+  Serial.printf("Downloading %d bytes...\n", totalLen);
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buf[2048];
+  int written = 0;
+  int lastNotifiedPct = -1;
+  unsigned long lastDataTime = millis();
+
+  while (written < totalLen) {
+    size_t avail = stream->available();
+    if (avail > 0) {
+      int toRead = avail < sizeof(buf) ? avail : sizeof(buf);
+      int bytesRead = stream->readBytes(buf, toRead);
+      if (bytesRead <= 0) continue;
+      if ((int)Update.write(buf, bytesRead) != bytesRead) {
+        Update.abort();
+        http.end();
+        return String("Flash write failed: ") + Update.errorString();
+      }
+      written += bytesRead;
+      lastDataTime = millis();
+
+      int pct = (int)((int64_t)written * 100 / totalLen);
+      if (pct / 5 != lastNotifiedPct / 5) {
+        lastNotifiedPct = pct;
+        setOtaStatus("UPDATING:" + String(pct), false);
+      }
+    } else {
+      if (!stream->connected() && written < totalLen) {
+        Update.abort();
+        http.end();
+        return "Connection lost mid-download.";
+      }
+      if (millis() - lastDataTime > 30000) {
+        Update.abort();
+        http.end();
+        return "Download stalled (no data for 30s).";
+      }
+      delay(5);
+    }
+  }
+  http.end();
+
+  if (!Update.end(true)) {
+    return String("Update finalize failed: ") + Update.errorString();
+  }
+
+  Serial.println("Update flashed OK. Rebooting...");
+  setOtaStatus("Firmware update installed successfully.", true);
+  delay(1500); // let the BLE notify get out
+  ESP.restart();
+  return ""; // unreachable
+}
 
 void setup() {
   Serial.begin(115200);
@@ -223,6 +367,8 @@ void setup() {
     Serial.println("LittleFS Mounted Successfully");
   }
 
+  loadWifiCredentials();
+
   BLEDevice::init("Air Bags");
 
   pServer = BLEDevice::createServer();
@@ -230,15 +376,15 @@ void setup() {
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
   // Left PSI TX
-  pCharLeft = pService->createCharacteristic(CHAR_LEFT_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);                   
+  pCharLeft = pService->createCharacteristic(CHAR_LEFT_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   pCharLeft->addDescriptor(new BLE2902());
 
   // Right PSI TX
-  pCharRight = pService->createCharacteristic(CHAR_RIGHT_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);                   
+  pCharRight = pService->createCharacteristic(CHAR_RIGHT_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   pCharRight->addDescriptor(new BLE2902());
 
   // Tank PSI TX
-  pCharTank = pService->createCharacteristic(CHAR_TANK_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);                   
+  pCharTank = pService->createCharacteristic(CHAR_TANK_PSI_UUID, BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   pCharTank->addDescriptor(new BLE2902());
 
   // Command RX
@@ -250,19 +396,29 @@ void setup() {
   pCharGraph->addDescriptor(new BLE2902());
   pCharGraph->setCallbacks(new MyGraphCallbacks());
 
-  // OTA Status
-  pCharOtaStatus = pService->createCharacteristic(CHAR_OTA_STATUS_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  // OTA Status (notify carries live update progress)
+  pCharOtaStatus = pService->createCharacteristic(CHAR_OTA_STATUS_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+  pCharOtaStatus->addDescriptor(new BLE2902());
   pCharOtaStatus->setCallbacks(new MyOtaStatusCallbacks());
-  pCharOtaStatus->setValue("");
+
+  // Surface any status persisted from before the last reboot
+  prefs.begin("airsus", true);
+  String storedMsg = prefs.getString("otamsg", "");
+  prefs.end();
+  pCharOtaStatus->setValue(storedMsg.c_str());
+
+  // Firmware Version
+  pCharVersion = pService->createCharacteristic(CHAR_VERSION_UUID, BLECharacteristic::PROPERTY_READ);
+  pCharVersion->setValue(FW_VERSION);
 
   pService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(false);
-  pAdvertising->setMinPreferred(0x0);  
+  pAdvertising->setMinPreferred(0x0);
   BLEDevice::startAdvertising();
-  Serial.println("Waiting for a client connection...");
+  Serial.println("Firmware v" FW_VERSION " — waiting for a client connection...");
 }
 
 unsigned long lastSensorUpdate = 0;
@@ -272,10 +428,12 @@ void loop() {
   if (otaMode) {
     if (!otaWifiConnected) {
       if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("Wi-Fi Connected! Starting ArduinoOTA...");
+        Serial.println("Wi-Fi Connected! Starting update...");
         otaWifiConnected = true;
         otaConnectedTime = millis();
-        
+
+        // Rescue path: keep the Arduino IDE network port available in
+        // case the self-update from GitHub fails.
         ArduinoOTA.onStart([]() {
           String type;
           if (ArduinoOTA.getCommand() == U_FLASH) {
@@ -301,32 +459,36 @@ void loop() {
 
         ArduinoOTA.begin();
       } else if (millis() - otaStartTime > 20000) { // 20s timeout
-        Serial.println("OTA Wi-Fi Timeout. Reverting to normal mode.");
-        otaMode = false;
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
-        otaErrorMessage = "Couldn't connect to Wi-Fi for OTA attempt.";
-        pCharOtaStatus->setValue(otaErrorMessage.c_str());
+        Serial.println("OTA Wi-Fi Timeout. Rebooting to normal mode.");
+        setOtaStatus("Couldn't connect to Wi-Fi \"" + wifiSsid + "\" for the update.", true);
+        delay(1000);
+        ESP.restart();
       }
     } else {
+      // Try the GitHub self-update once, right after Wi-Fi comes up
+      if (!selfUpdateAttempted) {
+        selfUpdateAttempted = true;
+        setOtaStatus("UPDATING:0", false);
+        String err = performGitHubUpdate(); // reboots on success
+        // Still here → it failed. Persist the error and leave the
+        // ArduinoOTA rescue window open for the idle timeout below.
+        setOtaStatus("Update failed: " + err + " (IDE rescue window open 5 min)", true);
+      }
+
       ArduinoOTA.handle();
-      
-      // 5 min timeout if connected but no files transferring
+
+      // 5 min rescue window, then reboot back to normal mode
       if (!otaUpdateStarted && (millis() - otaConnectedTime > 300000)) {
-         Serial.println("OTA Idle Timeout. No files received. Reverting to normal mode.");
-         otaMode = false;
-         otaWifiConnected = false;
-         WiFi.disconnect(true);
-         WiFi.mode(WIFI_OFF);
-         otaErrorMessage = "Wi-Fi connected for OTA but no files were received within 5 minutes.";
-         pCharOtaStatus->setValue(otaErrorMessage.c_str());
+         Serial.println("OTA rescue window closed. Rebooting to normal mode.");
+         delay(200);
+         ESP.restart();
       }
     }
     return; // Skip normal air suspension loop while in OTA mode
   }
 
   if (deviceConnected) {
-    
+
     // --- 1. SENSOR READING & NOTIFICATION ---
     if (millis() - lastSensorUpdate > 500) {
       lastSensorUpdate = millis();
@@ -455,12 +617,12 @@ void loop() {
 
   // Handle disconnect
   if (!deviceConnected && oldDeviceConnected) {
-      delay(500); 
+      delay(500);
       pServer->startAdvertising();
       Serial.println("Start advertising");
       oldDeviceConnected = deviceConnected;
   }
-  
+
   if (deviceConnected && !oldDeviceConnected) {
       oldDeviceConnected = deviceConnected;
       // Initialize targets to 0 when newly connected
@@ -495,9 +657,9 @@ void loop() {
     File file = LittleFS.open("/history.csv", FILE_APPEND);
     if (file) {
         char logStr[80];
-        sprintf(logStr, "%lu,%d,%d,%d,%d,%d\n", currentEpoch, 
-                leftPsi >= 0 ? leftPsi : 0, 
-                rightPsi >= 0 ? rightPsi : 0, 
+        sprintf(logStr, "%lu,%d,%d,%d,%d,%d\n", currentEpoch,
+                leftPsi >= 0 ? leftPsi : 0,
+                rightPsi >= 0 ? rightPsi : 0,
                 tankPsi >= 0 ? tankPsi : 0,
                 targetLeftPsi,
                 targetRightPsi);

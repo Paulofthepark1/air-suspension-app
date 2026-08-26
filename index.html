@@ -17,6 +17,7 @@
   <div class="app-container">
     <div class="header">
       <span id="ble-status">No Device Selected</span>
+      <div id="fw-info" class="fw-info"></div>
       <div style="margin-top: 15px;">
         <button id="btn-sync" class="sync-btn active">SYNC: ON</button>
       </div>
@@ -82,8 +83,21 @@
     <div class="connect-container">
       <button class="connect-btn" id="btn-connect">CONNECT</button>
       <button class="connect-btn" id="btn-graph" style="margin-top: 10px; background-color: #3f51b5; display: none;">VIEW GRAPH</button>
-      <button class="connect-btn" id="btn-ota" style="margin-top: 10px; background-color: #ff9800; display: none; color: white;">ENABLE OTA UPDATE</button>
+      <button class="connect-btn" id="btn-ota" style="margin-top: 10px; background-color: #ff9800; display: none; color: white;">UPDATE FIRMWARE</button>
+      <button class="connect-btn" id="btn-wifi" style="margin-top: 10px; background-color: #555; display: none; color: white;">WI-FI SETUP</button>
       <button class="start-btn" id="btn-dump" style="margin-top: 15px; background-color: #ff3b30; width: 100%; font-size: 20px; touch-action: manipulation;">EMPTY AIR TANK</button>
+    </div>
+
+    <!-- WI-FI SETUP MODAL -->
+    <div id="wifi-modal" class="modal">
+      <div class="modal-content dark">
+        <span class="close-btn" id="btn-close-wifi">&times;</span>
+        <h2 style="margin-top: 0;">Wi-Fi Setup</h2>
+        <p class="wifi-hint">Saved on the controller and used only when downloading firmware updates.</p>
+        <input type="text" id="wifi-ssid" class="wifi-input" placeholder="Network name (SSID)" autocomplete="off">
+        <input type="password" id="wifi-pass" class="wifi-input" placeholder="Password" autocomplete="off">
+        <button class="start-btn" id="btn-wifi-save" style="width: 100%; margin-top: 15px; font-size: 1.1rem;">SAVE TO CONTROLLER</button>
+      </div>
     </div>
 
     <!-- GRAPH MODAL -->
