@@ -21,7 +21,7 @@
 #include <Preferences.h>
 #include <Update.h>
 
-#define FW_VERSION "2.0.0"
+#define FW_VERSION "2.0.1"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -168,7 +168,8 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
       String rxValue = pCharacteristic->getValue(); // Now officially String for > 3.0.0
 
-      // Expected format: SET:80:85  (Left:Right) or DUMP:1 / DUMP:0
+      // Expected format: SET:80:85  (Left:Right); "-" leaves that side
+      // untouched (per-side set), e.g. SET:80:- or SET:-:85
       if (rxValue.startsWith("SET:")) {
         int firstColon = rxValue.indexOf(':');
         int secondColon = rxValue.indexOf(':', firstColon + 1);
@@ -177,24 +178,28 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
           String leftStr = rxValue.substring(firstColon + 1, secondColon);
           String rightStr = rxValue.substring(secondColon + 1);
 
-          targetLeftPsi = leftStr.toInt();
-          targetRightPsi = rightStr.toInt();
           commandReceived = true; // NOW activate the control loop
 
-          if (leftPsi >= 0) {
-            if (targetLeftPsi > leftPsi) leftState = FILLING;
-            else if (targetLeftPsi < leftPsi) leftState = DEFLATING;
-            else leftState = IDLE;
-          } else {
-            leftState = IDLE;
+          if (leftStr != "-") {
+            targetLeftPsi = leftStr.toInt();
+            if (leftPsi >= 0) {
+              if (targetLeftPsi > leftPsi) leftState = FILLING;
+              else if (targetLeftPsi < leftPsi) leftState = DEFLATING;
+              else leftState = IDLE;
+            } else {
+              leftState = IDLE;
+            }
           }
 
-          if (rightPsi >= 0) {
-            if (targetRightPsi > rightPsi) rightState = FILLING;
-            else if (targetRightPsi < rightPsi) rightState = DEFLATING;
-            else rightState = IDLE;
-          } else {
-            rightState = IDLE;
+          if (rightStr != "-") {
+            targetRightPsi = rightStr.toInt();
+            if (rightPsi >= 0) {
+              if (targetRightPsi > rightPsi) rightState = FILLING;
+              else if (targetRightPsi < rightPsi) rightState = DEFLATING;
+              else rightState = IDLE;
+            } else {
+              rightState = IDLE;
+            }
           }
 
           Serial.print("New targets - Left: ");
