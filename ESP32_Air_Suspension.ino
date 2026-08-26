@@ -21,7 +21,7 @@
 #include <Preferences.h>
 #include <Update.h>
 
-#define FW_VERSION "2.0.1"
+#define FW_VERSION "2.1.0"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -32,6 +32,7 @@ BLECharacteristic* pCharGraph = NULL;
 BLECharacteristic* pCharOtaStatus = NULL;
 BLECharacteristic* pCharVersion = NULL;
 BLECharacteristic* pCharFwData = NULL;
+BLECharacteristic* pCharMode = NULL;
 
 // Wi-Fi credentials live in NVS, set from the app via WIFI: command.
 // Only used for the ArduinoOTA rescue path.
@@ -75,6 +76,27 @@ ControlState rightState = IDLE;
 
 bool commandReceived = false; // Solenoids stay off until user sends SET
 
+// ---- DRIVE MODES ----
+// TOW: manual SET control (original behavior).
+// DAILY: the controller autonomously holds the bags at dailyTargetPsi,
+// with or without a phone connected, and persists across reboots.
+enum DriveMode { MODE_TOW = 0, MODE_DAILY = 1 };
+DriveMode driveMode = MODE_TOW;
+int dailyTargetPsi = 10;                        // DTGT: command, NVS-persisted
+const int DAILY_MIN_PSI = 5;                    // critical floor — fill below this no matter what
+const int DAILY_FILL_HYST = 2;                  // refill when psi <= target - hyst
+const int DAILY_DEFL_HYST = 3;                  // deflate when psi >= target + hyst
+const int TANK_FILL_MARGIN = 3;                 // tank must exceed target by this for air to flow
+const unsigned long DAILY_FILL_MAX_MS = 30000;  // cap a fill attempt — a burst line can't drain the tank
+const unsigned long DAILY_COOLDOWN_MS = 45000;  // wait between capped attempts
+
+bool dailyFillingL = false, dailyFillingR = false;
+bool dailyDeflatingL = false, dailyDeflatingR = false;
+unsigned long dailyFillStartL = 0, dailyFillStartR = 0;
+unsigned long dailyCooldownL = 0, dailyCooldownR = 0;
+unsigned long lastDailyCheck = 0;
+String modeStatusValue = "";
+
 // Graph Logging Variables
 unsigned long bootTimestamp = 0;
 bool timeSet = false;
@@ -107,6 +129,7 @@ const int TANK_SENSOR_PIN = 6;
 #define CHAR_OTA_STATUS_UUID   "beb5483e-36e6-4688-b7f5-ea07361b26a8"
 #define CHAR_VERSION_UUID      "beb5483e-36e7-4688-b7f5-ea07361b26a8"
 #define CHAR_FW_DATA_UUID      "beb5483e-36e8-4688-b7f5-ea07361b26a8"
+#define CHAR_MODE_UUID         "beb5483e-36e9-4688-b7f5-ea07361b26a8"
 
 void stopAllSolenoids() {
   digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
@@ -133,7 +156,124 @@ void loadWifiCredentials() {
   prefs.begin("airsus", true);
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.getString("pass", "");
+  driveMode = prefs.getUChar("mode", 0) == 1 ? MODE_DAILY : MODE_TOW;
+  dailyTargetPsi = prefs.getInt("dtgt", 10);
   prefs.end();
+  if (dailyTargetPsi < DAILY_MIN_PSI) dailyTargetPsi = DAILY_MIN_PSI;
+  if (dailyTargetPsi > 50) dailyTargetPsi = 50;
+}
+
+void publishModeStatus(const String& s) {
+  if (s == modeStatusValue) return;
+  modeStatusValue = s;
+  pCharMode->setValue(s.c_str());
+  pCharMode->notify();
+  Serial.println("Mode status: " + s);
+}
+
+void resetDailyState() {
+  dailyFillingL = dailyFillingR = false;
+  dailyDeflatingL = dailyDeflatingR = false;
+  dailyCooldownL = dailyCooldownR = 0;
+}
+
+void setDriveMode(DriveMode m) {
+  driveMode = m;
+  prefs.begin("airsus", false);
+  prefs.putUChar("mode", m == MODE_DAILY ? 1 : 0);
+  prefs.end();
+  stopAllSolenoids();
+  commandReceived = false;
+  leftState = IDLE;
+  rightState = IDLE;
+  resetDailyState();
+  modeStatusValue = ""; // force republish
+  if (m == MODE_TOW) {
+    publishModeStatus("T");
+  } else {
+    // loop() takes over within a second; publish a provisional state now
+    publishModeStatus("D:OK:" + String(dailyTargetPsi));
+  }
+  Serial.println(m == MODE_DAILY ? "Mode: DAILY" : "Mode: TOW");
+}
+
+// One side of DAILY-mode maintenance. Fill/deflate toward dailyTargetPsi
+// with hysteresis; fill attempts are time-capped so a burst bag or empty
+// tank can't hold a valve open indefinitely.
+void serviceDailySide(int psi, int inPin, int outPin,
+                      bool &filling, bool &deflating,
+                      unsigned long &fillStart, unsigned long &cooldownUntil,
+                      bool tankOk, bool &wantsButCant) {
+  if (psi < 0) { // no sensor reading — keep this side's valves shut
+    filling = false;
+    deflating = false;
+    digitalWrite(inPin, RELAY_OFF);
+    digitalWrite(outPin, RELAY_OFF);
+    return;
+  }
+
+  if (deflating) {
+    if (psi <= dailyTargetPsi) {
+      deflating = false;
+      digitalWrite(outPin, RELAY_OFF);
+    }
+    return;
+  }
+
+  if (filling) {
+    if (psi >= dailyTargetPsi) {
+      filling = false;
+      digitalWrite(inPin, RELAY_OFF);
+    } else if (millis() - fillStart > DAILY_FILL_MAX_MS) {
+      filling = false;
+      digitalWrite(inPin, RELAY_OFF);
+      cooldownUntil = millis() + DAILY_COOLDOWN_MS;
+      Serial.println("Daily fill attempt capped; cooling down.");
+    } else if (!tankOk) {
+      filling = false;
+      digitalWrite(inPin, RELAY_OFF);
+      wantsButCant = true;
+    }
+    return;
+  }
+
+  if (psi >= dailyTargetPsi + DAILY_DEFL_HYST) {
+    deflating = true;
+    digitalWrite(inPin, RELAY_OFF);
+    digitalWrite(outPin, RELAY_ON);
+  } else if (psi <= dailyTargetPsi - DAILY_FILL_HYST || psi < DAILY_MIN_PSI) {
+    if (!tankOk) {
+      wantsButCant = true;
+    } else if (millis() >= cooldownUntil) {
+      filling = true;
+      fillStart = millis();
+      digitalWrite(outPin, RELAY_OFF);
+      digitalWrite(inPin, RELAY_ON);
+    }
+  }
+}
+
+void serviceDailyMode() {
+  // Unknown tank sensor: allow fills (the 30s cap is the backstop)
+  bool tankOk = (tankPsi < 0) ? true : (tankPsi >= dailyTargetPsi + TANK_FILL_MARGIN);
+  bool wantsButCant = false;
+
+  serviceDailySide(leftPsi, LEFT_AIR_IN_PIN, LEFT_AIR_OUT_PIN,
+                   dailyFillingL, dailyDeflatingL, dailyFillStartL, dailyCooldownL,
+                   tankOk, wantsButCant);
+  serviceDailySide(rightPsi, RIGHT_AIR_IN_PIN, RIGHT_AIR_OUT_PIN,
+                   dailyFillingR, dailyDeflatingR, dailyFillStartR, dailyCooldownR,
+                   tankOk, wantsButCant);
+
+  bool bagsCritical = ((leftPsi >= 0 && leftPsi < DAILY_MIN_PSI) ||
+                       (rightPsi >= 0 && rightPsi < DAILY_MIN_PSI)) && !tankOk;
+  String st;
+  if (bagsCritical) st = "LOWBAGS";
+  else if (wantsButCant) st = "LOWTANK";
+  else if (dailyFillingL || dailyFillingR) st = "FILL";
+  else if (dailyDeflatingL || dailyDeflatingR) st = "DEFL";
+  else st = "OK";
+  publishModeStatus("D:" + st + ":" + String(dailyTargetPsi));
 }
 
 void abortFwTransfer(const String& reason) {
@@ -150,12 +290,17 @@ class MyServerCallbacks: public BLEServerCallbacks {
     };
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
-      commandReceived = false; // Stop control loop
-      stopAllSolenoids(); // Safety stop on disconnect
-      targetLeftPsi = 0;
-      targetRightPsi = 0;
-      leftState = IDLE;
-      rightState = IDLE;
+      digitalWrite(TANK_DUMP_PIN, RELAY_OFF); // never leave the dump latched
+      if (driveMode == MODE_TOW) {
+        // Safety stop on disconnect — manual control needs a live phone.
+        // DAILY maintenance is autonomous and keeps running.
+        commandReceived = false;
+        stopAllSolenoids();
+        targetLeftPsi = 0;
+        targetRightPsi = 0;
+        leftState = IDLE;
+        rightState = IDLE;
+      }
       if (fwReceiving) {
         fwReceiving = false;
         Update.abort();
@@ -171,6 +316,10 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
       // Expected format: SET:80:85  (Left:Right); "-" leaves that side
       // untouched (per-side set), e.g. SET:80:- or SET:-:85
       if (rxValue.startsWith("SET:")) {
+        if (driveMode == MODE_DAILY) {
+          setOtaStatus("In Daily mode — switch to Tow for manual control.", false);
+          return;
+        }
         int firstColon = rxValue.indexOf(':');
         int secondColon = rxValue.indexOf(':', firstColon + 1);
 
@@ -207,6 +356,23 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
           Serial.print(" Right: ");
           Serial.println(targetRightPsi);
         }
+      } else if (rxValue == "MODE:TOW") {
+        setDriveMode(MODE_TOW);
+      } else if (rxValue == "MODE:DAILY") {
+        setDriveMode(MODE_DAILY);
+      } else if (rxValue.startsWith("DTGT:")) {
+        int t = rxValue.substring(5).toInt();
+        if (t < DAILY_MIN_PSI) t = DAILY_MIN_PSI;
+        if (t > 50) t = 50;
+        dailyTargetPsi = t;
+        prefs.begin("airsus", false);
+        prefs.putInt("dtgt", t);
+        prefs.end();
+        modeStatusValue = ""; // force republish with the new target
+        if (driveMode == MODE_DAILY) serviceDailyMode();
+        else publishModeStatus("T");
+        Serial.print("Daily target set to ");
+        Serial.println(t);
       } else if (rxValue == "DUMP:1") {
         digitalWrite(TANK_DUMP_PIN, RELAY_ON);
         Serial.println("Dumping tank...");
@@ -246,6 +412,7 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
         stopAllSolenoids();
         leftState = IDLE;
         rightState = IDLE;
+        resetDailyState();
         if (!Update.begin(size)) {
           setOtaStatus(String("FWERR:begin failed: ") + Update.errorString(), false);
           return;
@@ -440,6 +607,12 @@ void setup() {
   pCharFwData = pService->createCharacteristic(CHAR_FW_DATA_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
   pCharFwData->setCallbacks(new MyFwDataCallbacks());
 
+  // Drive mode + DAILY status ("T" or "D:<OK|FILL|DEFL|LOWTANK|LOWBAGS>:<target>")
+  pCharMode = pService->createCharacteristic(CHAR_MODE_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pCharMode->addDescriptor(new BLE2902());
+  modeStatusValue = (driveMode == MODE_DAILY) ? ("D:OK:" + String(dailyTargetPsi)) : String("T");
+  pCharMode->setValue(modeStatusValue.c_str());
+
   pService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -511,9 +684,10 @@ void loop() {
     abortFwTransfer("transfer stalled (no data for 30s)");
   }
 
-  if (deviceConnected && !fwReceiving) {
-
-    // --- 1. SENSOR READING & NOTIFICATION ---
+  // --- 1. SENSOR READING & NOTIFICATION ---
+  // Runs whether or not a phone is connected: DAILY maintenance needs
+  // live readings on its own. Notifies only reach a connected client.
+  if (!fwReceiving) {
     if (millis() - lastSensorUpdate > 500) {
       lastSensorUpdate = millis();
 
@@ -544,7 +718,7 @@ void loop() {
         Serial.println(leftPsi);
       }
       pCharLeft->setValue((uint8_t*)lStr, strlen(lStr));
-      pCharLeft->notify();
+      if (deviceConnected) pCharLeft->notify();
 
       // RIGHT SENSOR on Pin 35 (ADC1)
       int rawAdcR = analogRead(RIGHT_SENSOR_PIN);
@@ -560,7 +734,7 @@ void loop() {
         sprintf(rStr, "%d", rightPsi);
       }
       pCharRight->setValue((uint8_t*)rStr, strlen(rStr));
-      pCharRight->notify();
+      if (deviceConnected) pCharRight->notify();
 
       // TANK SENSOR on Pin 32 (ADC1)
       int rawAdcT = analogRead(TANK_SENSOR_PIN);
@@ -576,11 +750,17 @@ void loop() {
         sprintf(tStr, "%d", tankPsi);
       }
       pCharTank->setValue((uint8_t*)tStr, strlen(tStr));
-      pCharTank->notify();
+      if (deviceConnected) pCharTank->notify();
     }
 
-    // --- 2. CONTROL LOOP (50ms interval) - ONLY after user sends SET ---
-    if (commandReceived && millis() - lastControlUpdate > 50) {
+    // --- 2a. DAILY MODE MAINTENANCE (1s cadence, phone optional) ---
+    if (driveMode == MODE_DAILY && millis() - lastDailyCheck > 1000) {
+      lastDailyCheck = millis();
+      serviceDailyMode();
+    }
+
+    // --- 2b. TOW CONTROL LOOP (50ms) - only when connected, after SET ---
+    if (driveMode == MODE_TOW && deviceConnected && commandReceived && millis() - lastControlUpdate > 50) {
       lastControlUpdate = millis();
 
       // LEFT SIDE LOGIC (only if sensor is connected)

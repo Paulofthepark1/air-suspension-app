@@ -14,6 +14,7 @@ const CHAR_GRAPH_UUID = "beb5483e-36e5-4688-b7f5-ea07361b26a8";
 const CHAR_OTA_STATUS_UUID = "beb5483e-36e6-4688-b7f5-ea07361b26a8";
 const CHAR_VERSION_UUID = "beb5483e-36e7-4688-b7f5-ea07361b26a8";
 const CHAR_FW_DATA_UUID = "beb5483e-36e8-4688-b7f5-ea07361b26a8";
+const CHAR_MODE_UUID = "beb5483e-36e9-4688-b7f5-ea07361b26a8";
 
 // Firmware binaries are auto-built from this repo by GitHub Actions and
 // published to the "firmware" branch (raw.githubusercontent serves CORS)
@@ -33,6 +34,9 @@ let latestFwVersion = null;   // latest published firmware version, e.g. "2.1.0"
 let latestFwMeta = null;      // {version, size, md5} from version.json
 let updateInProgress = false;
 let fwTransfer = null;        // active transfer's notify router
+let modeCharacteristic = null;
+let modeInfo = null;          // {daily, status, target} — null = mode-less firmware
+let lastWarnedStatus = null;  // for system-notification transitions
 
 // Target state
 let targetLeft = parseInt(localStorage.getItem('targetLeft')) || 0;
@@ -65,7 +69,14 @@ const ui = {
   btnWifiSave: document.getElementById('btn-wifi-save'),
   wifiSsidInput: document.getElementById('wifi-ssid'),
   wifiPassInput: document.getElementById('wifi-pass'),
-  btnRescue: document.getElementById('btn-rescue')
+  btnRescue: document.getElementById('btn-rescue'),
+  btnMode: document.getElementById('btn-mode'),
+  modeBanner: document.getElementById('mode-banner'),
+  dailyPanel: document.getElementById('daily-panel'),
+  dailyTarget: document.getElementById('daily-target'),
+  btnDailyMinus: document.getElementById('btn-daily-minus'),
+  btnDailyPlus: document.getElementById('btn-daily-plus'),
+  dailyStatus: document.getElementById('daily-status')
 };
 
 // -- SHARED CONNECTION LOGIC --
@@ -122,6 +133,21 @@ async function connectToDevice(device) {
     otaStatusCharacteristic.addEventListener('characteristicvaluechanged', handleOtaStatusNotify);
   } catch(e) {
     console.log("OTA status notifications not supported (legacy firmware).");
+  }
+
+  // Drive mode characteristic (fw >= 2.1.0)
+  modeCharacteristic = null;
+  modeInfo = null;
+  try {
+    modeCharacteristic = await service.getCharacteristic(CHAR_MODE_UUID);
+    const modeVal = await modeCharacteristic.readValue();
+    handleModeValue(new TextDecoder('utf-8').decode(modeVal));
+    await modeCharacteristic.startNotifications();
+    modeCharacteristic.addEventListener('characteristicvaluechanged', (evt) => {
+      handleModeValue(new TextDecoder('utf-8').decode(evt.target.value));
+    });
+  } catch(e) {
+    console.log("No mode characteristic — firmware without drive modes.");
   }
 
   // Setup Notifications
@@ -236,8 +262,10 @@ function onConnected() {
   ui.btnGraph.style.display = 'inline-block';
   ui.btnOta.style.display = 'inline-block';
   ui.btnWifi.style.display = 'inline-block';
+  ui.btnMode.style.display = modeCharacteristic ? 'inline-block' : 'none';
   updateInProgress = false;
 
+  applyModeUI();
   updateSetButtonsLayout();
   updateFirmwareUI();
   checkLatestFirmware();
@@ -272,9 +300,14 @@ function onDisconnected() {
   ui.btnGraph.style.display = 'none';
   ui.btnOta.style.display = 'none';
   ui.btnWifi.style.display = 'none';
+  ui.btnMode.style.display = 'none';
+  ui.modeBanner.style.display = 'none';
+  ui.dailyPanel.style.display = 'none';
+  document.body.classList.remove('daily-mode');
   cmdCharacteristic = null;
   graphCharacteristic = null;
   otaStatusCharacteristic = null;
+  modeCharacteristic = null;
   updateSetButtonsLayout();
   // Make targets modified again so user knows to hit SET
   appliedLeft = -1;
@@ -701,6 +734,118 @@ ui.btnWifiSave.addEventListener('click', async () => {
     alert("Failed to send Wi-Fi credentials: " + e.message);
   }
 });
+
+// -- DRIVE MODES (fw >= 2.1.0) --
+// Mode characteristic value: "T" (tow) or "D:<status>:<target>" where
+// status is OK | FILL | DEFL | LOWTANK | LOWBAGS
+
+const DAILY_STATUS_TEXT = {
+  OK: "Holding — bags OK",
+  FILL: "Topping up...",
+  DEFL: "Releasing down to target...",
+  LOWTANK: "Waiting on tank pressure",
+  LOWBAGS: "BAGS LOW — need air now!"
+};
+
+function handleModeValue(val) {
+  val = (val || "").trim();
+  if (val === "T") {
+    modeInfo = { daily: false };
+  } else if (val.startsWith("D:")) {
+    const parts = val.split(":");
+    modeInfo = { daily: true, status: parts[1] || "OK", target: parseInt(parts[2]) || 10 };
+  } else {
+    return;
+  }
+  applyModeUI();
+
+  // Escalate warnings to a system notification on transition
+  const status = modeInfo.daily ? modeInfo.status : null;
+  if ((status === "LOWTANK" || status === "LOWBAGS") && status !== lastWarnedStatus) {
+    systemNotify(
+      status === "LOWBAGS" ? "Air bags critically low!" : "Air tank too low",
+      status === "LOWBAGS"
+        ? "Bags are under 5 PSI and the tank can't fill them. Turn the compressor on now."
+        : "Tank pressure is too low to top up the bags. Turn the compressor on."
+    );
+  }
+  lastWarnedStatus = status;
+}
+
+function applyModeUI() {
+  const daily = !!(modeInfo && modeInfo.daily);
+  document.body.classList.toggle('daily-mode', daily);
+  ui.btnMode.innerText = daily ? "MODE: DAILY" : "MODE: TOW";
+  ui.btnMode.classList.toggle('active', daily);
+  ui.dailyPanel.style.display = daily && cmdCharacteristic ? 'block' : 'none';
+
+  if (daily) {
+    ui.dailyTarget.innerText = modeInfo.target;
+    ui.dailyStatus.innerText = DAILY_STATUS_TEXT[modeInfo.status] || "—";
+
+    if (modeInfo.status === "LOWBAGS") {
+      ui.modeBanner.innerText = "⚠ BAGS UNDER 5 PSI — tank can't fill them. Turn the compressor ON!";
+      ui.modeBanner.style.display = 'block';
+    } else if (modeInfo.status === "LOWTANK") {
+      ui.modeBanner.innerText = "Tank too low to top up the bags — turn the compressor on.";
+      ui.modeBanner.style.display = 'block';
+    } else {
+      ui.modeBanner.style.display = 'none';
+    }
+  } else {
+    ui.modeBanner.style.display = 'none';
+  }
+}
+
+function systemNotify(title, body) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  navigator.serviceWorker.getRegistration().then(reg => {
+    if (reg && reg.showNotification) {
+      reg.showNotification(title, { body, icon: './icon-192.png', badge: './icon-192.png' });
+    } else {
+      new Notification(title, { body });
+    }
+  }).catch(() => {
+    try { new Notification(title, { body }); } catch(_) {}
+  });
+}
+
+ui.btnMode.addEventListener('click', async () => {
+  if (!cmdCharacteristic || !modeCharacteristic) return;
+  const goingDaily = !(modeInfo && modeInfo.daily);
+  const target = (modeInfo && modeInfo.target) || 10;
+  const prompt = goingDaily
+    ? `Switch to DAILY mode? The controller will adjust the bags to ${target} PSI and hold them there automatically — even with the app closed.`
+    : "Switch to TOW mode? Automatic pressure holding stops; you control the bags with SET.";
+  if (!confirm(prompt)) return;
+
+  if (goingDaily && "Notification" in window && Notification.permission === "default") {
+    try { await Notification.requestPermission(); } catch(_) {}
+  }
+  try {
+    const encoder = new TextEncoder('utf-8');
+    await cmdCharacteristic.writeValue(encoder.encode(goingDaily ? "MODE:DAILY" : "MODE:TOW"));
+  } catch(e) {
+    console.error("Mode switch error", e);
+  }
+});
+
+async function adjustDailyTarget(delta) {
+  if (!cmdCharacteristic || !modeInfo || !modeInfo.daily) return;
+  const t = Math.max(5, Math.min(30, modeInfo.target + delta));
+  if (t === modeInfo.target) return;
+  try {
+    const encoder = new TextEncoder('utf-8');
+    await cmdCharacteristic.writeValue(encoder.encode("DTGT:" + t));
+    modeInfo.target = t;      // optimistic; firmware republishes the real value
+    ui.dailyTarget.innerText = t;
+  } catch(e) {
+    console.error("Daily target error", e);
+  }
+}
+
+ui.btnDailyMinus.addEventListener('click', () => adjustDailyTarget(-1));
+ui.btnDailyPlus.addEventListener('click', () => adjustDailyTarget(1));
 
 ui.btnRescue.addEventListener('click', async () => {
   if (!cmdCharacteristic) return;
