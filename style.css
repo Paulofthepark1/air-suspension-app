@@ -280,6 +280,45 @@ body, html {
   color: #ff3b30;
 }
 
+.fw-info {
+  font-size: 0.75rem;
+  color: #666;
+  margin-top: 6px;
+  text-transform: none;
+  letter-spacing: 0.5px;
+}
+
+.connect-btn.update-available {
+  background-color: #ff9800 !important;
+  border-color: #ff9800;
+  animation: pulseRed 2s infinite;
+}
+
+.wifi-hint {
+  font-size: 0.85rem;
+  color: #999;
+  margin: 5px 0 15px 0;
+}
+
+.wifi-input {
+  width: 100%;
+  padding: 12px;
+  margin-top: 10px;
+  border-radius: 8px;
+  border: 1px solid #555;
+  background: #2a2a2a;
+  color: #fff;
+  font-size: 1rem;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.modal-content.dark {
+  background-color: #1e1e1e;
+  color: #fff;
+  border-color: #444;
+}
+
 /* Modal Styles */
 .modal {
   display: none; 

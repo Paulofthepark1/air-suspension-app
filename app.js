@@ -12,12 +12,27 @@ const CHAR_TANK_PSI_UUID = "beb5483e-36e4-4688-b7f5-ea07361b26a8";
 const CHAR_CMD_UUID = "beb5483e-36e3-4688-b7f5-ea07361b26a8";
 const CHAR_GRAPH_UUID = "beb5483e-36e5-4688-b7f5-ea07361b26a8";
 const CHAR_OTA_STATUS_UUID = "beb5483e-36e6-4688-b7f5-ea07361b26a8";
+const CHAR_VERSION_UUID = "beb5483e-36e7-4688-b7f5-ea07361b26a8";
+const CHAR_FW_DATA_UUID = "beb5483e-36e8-4688-b7f5-ea07361b26a8";
+
+// Firmware binaries are auto-built from this repo by GitHub Actions and
+// published to the "firmware" branch (raw.githubusercontent serves CORS)
+const GITHUB_REPO = "Paulofthepark1/air-suspension-app";
+const FW_BASE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/firmware`;
+const FW_CHUNK_SIZE = 200;  // bytes per BLE write
+const FW_ACK_EVERY = 64;    // chunks per FWACK (must match the firmware)
 
 let bleDevice = null;
 let cmdCharacteristic = null;
 let graphCharacteristic = null;
 let otaStatusCharacteristic = null;
+let fwDataCharacteristic = null;
 let isAutoReconnecting = false;
+let deviceFwVersion = null;   // null = legacy firmware without version characteristic
+let latestFwVersion = null;   // latest published firmware version, e.g. "2.1.0"
+let latestFwMeta = null;      // {version, size, md5} from version.json
+let updateInProgress = false;
+let fwTransfer = null;        // active transfer's notify router
 
 // Target state
 let targetLeft = parseInt(localStorage.getItem('targetLeft')) || 0;
@@ -40,7 +55,15 @@ const ui = {
   btnOta: document.getElementById('btn-ota'),
   graphModal: document.getElementById('graph-modal'),
   btnCloseGraph: document.getElementById('btn-close-graph'),
-  btnDump: document.getElementById('btn-dump')
+  btnDump: document.getElementById('btn-dump'),
+  fwInfo: document.getElementById('fw-info'),
+  btnWifi: document.getElementById('btn-wifi'),
+  wifiModal: document.getElementById('wifi-modal'),
+  btnCloseWifi: document.getElementById('btn-close-wifi'),
+  btnWifiSave: document.getElementById('btn-wifi-save'),
+  wifiSsidInput: document.getElementById('wifi-ssid'),
+  wifiPassInput: document.getElementById('wifi-pass'),
+  btnRescue: document.getElementById('btn-rescue')
 };
 
 // -- SHARED CONNECTION LOGIC --
@@ -62,19 +85,39 @@ async function connectToDevice(device) {
   graphCharacteristic = await service.getCharacteristic(CHAR_GRAPH_UUID);
   otaStatusCharacteristic = await service.getCharacteristic(CHAR_OTA_STATUS_UUID);
 
-  // Check for previous OTA error messages
+  // Firmware version + data characteristics only exist on v2+ firmware
+  deviceFwVersion = null;
+  fwDataCharacteristic = null;
+  try {
+    const versionChar = await service.getCharacteristic(CHAR_VERSION_UUID);
+    const verVal = await versionChar.readValue();
+    deviceFwVersion = new TextDecoder('utf-8').decode(verVal).trim();
+    fwDataCharacteristic = await service.getCharacteristic(CHAR_FW_DATA_UUID);
+  } catch(e) {
+    console.log("No version/fw-data characteristic — legacy firmware.");
+  }
+
+  // Check for status left over from the last update attempt
   ui.status.innerText = 'Checking OTA Status...';
   try {
     const otaStatusVal = await otaStatusCharacteristic.readValue();
     const decoder = new TextDecoder('utf-8');
     const otaMessage = decoder.decode(otaStatusVal);
-    if (otaMessage && otaMessage.trim() !== "") {
-      alert("Previous OTA Update Info: " + otaMessage);
+    if (otaMessage && otaMessage.trim() !== "" && !otaMessage.startsWith("UPDATING:") && !otaMessage.startsWith("Wi-Fi saved")) {
+      alert("Firmware Update Info: " + otaMessage);
       const encoder = new TextEncoder('utf-8');
       await otaStatusCharacteristic.writeValue(encoder.encode("CLEAR"));
     }
   } catch(e) {
     console.warn("Could not read OTA status", e);
+  }
+
+  // v2+ firmware notifies live update progress on the status characteristic
+  try {
+    await otaStatusCharacteristic.startNotifications();
+    otaStatusCharacteristic.addEventListener('characteristicvaluechanged', handleOtaStatusNotify);
+  } catch(e) {
+    console.log("OTA status notifications not supported (legacy firmware).");
   }
 
   // Setup Notifications
@@ -120,7 +163,7 @@ async function autoReconnect() {
     // Listen for the device's advertisement to know it's in range
     const abortController = new AbortController();
     
-    // Set a timeout — give up after 5 seconds
+    // Set a timeout — 15s covers the reboot after a firmware update
     const timeout = setTimeout(() => {
       abortController.abort();
       if (!bleDevice || !bleDevice.gatt.connected) {
@@ -130,7 +173,7 @@ async function autoReconnect() {
         ui.btnConnect.classList.remove('reconnecting');
         console.log('Auto-reconnect timed out.');
       }
-    }, 5000);
+    }, 15000);
 
     esp32.addEventListener('advertisementreceived', async (evt) => {
       console.log('Advertisement received, connecting...');
@@ -193,7 +236,11 @@ function onConnected() {
   ui.btnStart.classList.remove('disabled');
   ui.btnGraph.style.display = 'inline-block';
   ui.btnOta.style.display = 'inline-block';
-  
+  ui.btnWifi.style.display = 'inline-block';
+  updateInProgress = false;
+
+  updateFirmwareUI();
+  checkLatestFirmware();
   sendTimeAndRequestSync();
 }
 
@@ -212,12 +259,17 @@ async function sendTimeAndRequestSync() {
 }
 
 function onDisconnected() {
-  ui.status.innerText = 'Disconnected';
+  if (updateInProgress) {
+    ui.status.innerText = 'Installing update — reconnecting shortly...';
+  } else {
+    ui.status.innerText = 'Disconnected';
+  }
   ui.btnConnect.classList.remove('connected');
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
   ui.btnGraph.style.display = 'none';
   ui.btnOta.style.display = 'none';
+  ui.btnWifi.style.display = 'none';
   cmdCharacteristic = null;
   graphCharacteristic = null;
   otaStatusCharacteristic = null;
@@ -392,17 +444,236 @@ ui.btnDump.addEventListener('mouseup', stopDump);
 ui.btnDump.addEventListener('touchend', stopDump);
 ui.btnDump.addEventListener('mouseleave', stopDump);
 
-// -- OTA LOGIC --
+// -- FIRMWARE UPDATE LOGIC --
+
+// Compare "2.1.0"-style versions; true if a is newer than b
+function isNewerVersion(a, b) {
+  const pa = a.replace(/^v/, '').split('.').map(Number);
+  const pb = b.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
+
+async function checkLatestFirmware() {
+  try {
+    const res = await fetch(`${FW_BASE_URL}/version.json?t=${Date.now()}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const meta = await res.json();
+    latestFwVersion = (meta.version || "").replace(/^v/, '');
+    latestFwMeta = meta;
+  } catch(e) {
+    console.warn("Could not check GitHub for latest firmware", e);
+    latestFwVersion = null;
+    latestFwMeta = null;
+  }
+  updateFirmwareUI();
+}
+
+function updateFirmwareUI() {
+  const current = deviceFwVersion ? `v${deviceFwVersion}` : 'v1 (legacy)';
+  let info = `Firmware ${current}`;
+  ui.btnOta.classList.remove('update-available');
+
+  if (!deviceFwVersion) {
+    // Legacy firmware: OTA:1 opens the Arduino IDE network port only
+    ui.btnOta.innerText = 'ENABLE OTA UPDATE (IDE)';
+    if (latestFwVersion) info += ` — v${latestFwVersion} available via IDE`;
+  } else if (latestFwVersion && isNewerVersion(latestFwVersion, deviceFwVersion)) {
+    ui.btnOta.innerText = `INSTALL UPDATE v${latestFwVersion}`;
+    ui.btnOta.classList.add('update-available');
+    info += ` — update available!`;
+  } else if (latestFwVersion) {
+    ui.btnOta.innerText = 'FIRMWARE UP TO DATE';
+    info += ` — up to date`;
+  } else {
+    ui.btnOta.innerText = 'UPDATE FIRMWARE';
+    info += ` — couldn't reach GitHub`;
+  }
+  if (ui.fwInfo) ui.fwInfo.innerText = info;
+}
+
+function handleOtaStatusNotify(event) {
+  const msg = new TextDecoder('utf-8').decode(event.target.value);
+  if (msg.trim() === "") return;
+  // Let an active transfer consume its protocol messages first
+  if (fwTransfer && fwTransfer.onMessage(msg)) return;
+  ui.status.innerText = msg;
+  if (msg.startsWith("Update failed") || msg.startsWith("FWERR:")) updateInProgress = false;
+}
+
+// Stream the firmware image to the ESP32 over BLE.
+// Protocol: FWBEGIN:<size>:<md5> → FWREADY → 200B chunks with an FWACK
+// every 64 chunks → FWEND → FWOK + reboot. Any FWERR aborts.
+async function installFirmware(meta) {
+  const encoder = new TextEncoder('utf-8');
+
+  ui.status.innerText = 'Downloading firmware...';
+  const res = await fetch(`${FW_BASE_URL}/firmware.bin?t=${Date.now()}`);
+  if (!res.ok) throw new Error("Download failed (HTTP " + res.status + ")");
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength !== meta.size) {
+    throw new Error(`Downloaded size ${buf.byteLength} doesn't match expected ${meta.size}`);
+  }
+
+  updateInProgress = true;
+  let waiter = null;
+  const waitFor = (test, timeoutMs, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { waiter = null; reject(new Error(label + " timed out")); }, timeoutMs);
+    waiter = {
+      test,
+      resolve: (m) => { clearTimeout(timer); waiter = null; resolve(m); },
+      reject: (m) => { clearTimeout(timer); waiter = null; reject(new Error(m)); }
+    };
+  });
+  fwTransfer = {
+    onMessage(msg) {
+      if (msg.startsWith("FWERR:")) {
+        if (waiter) waiter.reject(msg);
+        return true;
+      }
+      if (waiter && waiter.test(msg)) {
+        waiter.resolve(msg);
+        return true;
+      }
+      // Swallow stray protocol messages so they don't clobber the status line
+      return msg === "FWREADY" || msg === "FWOK" || msg.startsWith("FWACK:");
+    }
+  };
+
+  try {
+    const readyPromise = waitFor(m => m === "FWREADY", 10000, "Update start");
+    await cmdCharacteristic.writeValue(encoder.encode(`FWBEGIN:${buf.byteLength}:${meta.md5}`));
+    await readyPromise;
+
+    const canWriteNR = typeof fwDataCharacteristic.writeValueWithoutResponse === 'function';
+    let sent = 0;
+    let chunkIdx = 0;
+    while (sent < buf.byteLength) {
+      const chunk = new Uint8Array(buf, sent, Math.min(FW_CHUNK_SIZE, buf.byteLength - sent));
+      chunkIdx++;
+      // Register the ack waiter before sending the chunk that triggers it
+      const ackPromise = (chunkIdx % FW_ACK_EVERY === 0)
+        ? waitFor(m => m.startsWith("FWACK:"), 15000, "Transfer ack")
+        : null;
+      if (canWriteNR) {
+        await fwDataCharacteristic.writeValueWithoutResponse(chunk);
+      } else {
+        await fwDataCharacteristic.writeValue(chunk);
+      }
+      sent += chunk.length;
+      if (ackPromise) {
+        const ack = await ackPromise;
+        const acked = parseInt(ack.substring(6));
+        if (acked !== sent) throw new Error(`Transfer out of sync (device got ${acked}, sent ${sent})`);
+        ui.status.innerText = `Installing firmware... ${Math.round(sent * 100 / buf.byteLength)}%`;
+      }
+    }
+
+    ui.status.innerText = 'Verifying and flashing...';
+    const okPromise = waitFor(m => m === "FWOK" || m.startsWith("Firmware update installed"), 30000, "Finalize");
+    await cmdCharacteristic.writeValue(encoder.encode("FWEND"));
+    await okPromise;
+    ui.status.innerText = 'Update installed — device rebooting...';
+  } catch (e) {
+    try { await cmdCharacteristic.writeValue(encoder.encode("FWABORT")); } catch(_) {}
+    updateInProgress = false;
+    throw e;
+  } finally {
+    fwTransfer = null;
+  }
+}
+
 ui.btnOta.addEventListener('click', async () => {
   if (!cmdCharacteristic) return;
-  const confirmed = confirm("This will disconnect Bluetooth and attempt to connect to Wi-Fi for an OTA update. Ensure you are parked in the driveway. Proceed?");
-  if (confirmed) {
+  if (updateInProgress) return;
+
+  // Legacy v1 firmware: only the Wi-Fi + Arduino IDE path exists
+  if (!deviceFwVersion || !fwDataCharacteristic) {
+    if (confirm("This will connect the ESP32 to Wi-Fi and open the Arduino IDE network port for a one-time manual update. Proceed?")) {
+      try {
+        const encoder = new TextEncoder('utf-8');
+        await cmdCharacteristic.writeValue(encoder.encode("OTA:1"));
+        ui.status.innerText = "Switching to OTA mode...";
+      } catch(e) {
+        console.error("Write error", e);
+      }
+    }
+    return;
+  }
+
+  if (!latestFwMeta) {
+    alert("Couldn't reach GitHub to check for firmware. Check your internet connection.");
+    return;
+  }
+
+  const isUpdate = latestFwVersion && isNewerVersion(latestFwVersion, deviceFwVersion);
+  const sizeMb = (latestFwMeta.size / 1048576).toFixed(1);
+  const prompt = isUpdate
+    ? `Install firmware v${latestFwVersion}? Your phone downloads it (~${sizeMb} MB) and sends it over Bluetooth — takes a few minutes. Keep the app open and stay near the truck.`
+    : "Firmware already looks up to date. Reinstall the latest version anyway?";
+
+  if (!confirm(prompt)) return;
+  try {
+    await installFirmware(latestFwMeta);
+  } catch (e) {
+    console.error("Firmware install failed", e);
+    ui.status.innerText = 'Update failed: ' + e.message;
+    alert("Firmware update failed: " + e.message + "\n\nThe controller is still running its current firmware — you can retry.");
+  }
+});
+
+// -- WI-FI SETUP LOGIC --
+ui.btnWifi.addEventListener('click', () => {
+  ui.wifiModal.style.display = "block";
+});
+
+ui.btnCloseWifi.addEventListener('click', () => {
+  ui.wifiModal.style.display = "none";
+});
+
+ui.btnWifiSave.addEventListener('click', async () => {
+  if (!cmdCharacteristic) return;
+  const ssid = ui.wifiSsidInput.value.trim();
+  const pass = ui.wifiPassInput.value;
+  if (!ssid) {
+    alert("Enter the Wi-Fi network name.");
+    return;
+  }
+  try {
+    const encoder = new TextEncoder('utf-8');
+    await cmdCharacteristic.writeValue(encoder.encode(`WIFI:${ssid}\n${pass}`));
+    // The firmware acknowledges on the status characteristic
+    setTimeout(async () => {
+      try {
+        const val = await otaStatusCharacteristic.readValue();
+        const msg = new TextDecoder('utf-8').decode(val);
+        alert(msg || "Wi-Fi credentials sent.");
+      } catch(e) {
+        alert("Wi-Fi credentials sent.");
+      }
+    }, 800);
+    ui.wifiModal.style.display = "none";
+    ui.wifiPassInput.value = "";
+  } catch(e) {
+    console.error("Wi-Fi save error", e);
+    alert("Failed to send Wi-Fi credentials: " + e.message);
+  }
+});
+
+ui.btnRescue.addEventListener('click', async () => {
+  if (!cmdCharacteristic) return;
+  if (confirm("Rescue mode: the controller joins Wi-Fi and opens the Arduino IDE network port for 5 minutes, then reboots. Continue?")) {
     try {
       const encoder = new TextEncoder('utf-8');
       await cmdCharacteristic.writeValue(encoder.encode("OTA:1"));
-      ui.status.innerText = "Switching to OTA mode...";
+      ui.wifiModal.style.display = "none";
+      ui.status.innerText = "Opening IDE rescue port...";
     } catch(e) {
-      console.error("Write error", e);
+      console.error("Rescue error", e);
     }
   }
 });
@@ -502,5 +773,8 @@ ui.btnCloseGraph.addEventListener('click', () => {
 window.addEventListener('click', (event) => {
   if (event.target == ui.graphModal) {
     ui.graphModal.style.display = "none";
+  }
+  if (event.target == ui.wifiModal) {
+    ui.wifiModal.style.display = "none";
   }
 });
