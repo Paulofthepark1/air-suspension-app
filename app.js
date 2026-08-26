@@ -69,6 +69,8 @@ const ui = {
 // -- SHARED CONNECTION LOGIC --
 async function connectToDevice(device) {
   bleDevice = device;
+  // remove-then-add so retry attempts don't stack duplicate listeners
+  bleDevice.removeEventListener('gattserverdisconnected', onDisconnected);
   bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
   
   ui.status.innerText = 'Connecting...';
@@ -137,18 +139,24 @@ async function connectToDevice(device) {
 }
 
 // -- AUTO-RECONNECT ON APP OPEN --
+// Uses getDevices() (persistent device permission) + direct gatt.connect()
+// attempts. watchAdvertisements() is not reliable on Android Chrome, so a
+// plain connect-with-retries is the compatible approach.
+const withTimeout = (promise, ms) => Promise.race([
+  promise,
+  new Promise((_, reject) => setTimeout(() => reject(new Error('timed out')), ms))
+]);
+
 async function autoReconnect() {
-  // Check if the browser supports getDevices (Chrome 85+, Edge)
   if (!navigator.bluetooth || !navigator.bluetooth.getDevices) {
     console.log('Auto-reconnect not supported in this browser.');
     return;
   }
+  if (isAutoReconnecting || (bleDevice && bleDevice.gatt.connected)) return;
 
   try {
     const devices = await navigator.bluetooth.getDevices();
-    // Find a previously paired ESP32
     const esp32 = devices.find(d => d.name && d.name === 'Air Bags');
-    
     if (!esp32) {
       console.log('No previously paired ESP32 found.');
       return;
@@ -156,53 +164,40 @@ async function autoReconnect() {
 
     console.log('Found previously paired device:', esp32.name);
     isAutoReconnecting = true;
-    ui.status.innerText = 'Reconnecting...';
+    ui.status.innerText = 'Connecting to Air Bags...';
     ui.btnConnect.innerText = 'CONNECTING...';
     ui.btnConnect.classList.add('reconnecting');
 
-    // Listen for the device's advertisement to know it's in range
-    const abortController = new AbortController();
-    
-    // Set a timeout — 15s covers the reboot after a firmware update
-    const timeout = setTimeout(() => {
-      abortController.abort();
-      if (!bleDevice || !bleDevice.gatt.connected) {
-        isAutoReconnecting = false;
-        ui.status.innerText = 'Tap CONNECT to pair';
-        ui.btnConnect.innerText = 'CONNECT';
-        ui.btnConnect.classList.remove('reconnecting');
-        console.log('Auto-reconnect timed out.');
-      }
-    }, 15000);
-
-    esp32.addEventListener('advertisementreceived', async (evt) => {
-      console.log('Advertisement received, connecting...');
-      clearTimeout(timeout);
-      abortController.abort(); // Stop watching
+    // ~4 attempts x (10s cap + 2s pause) also covers the reboot after a
+    // firmware update
+    for (let attempt = 1; attempt <= 4; attempt++) {
       try {
-        await connectToDevice(esp32);
+        await withTimeout(connectToDevice(esp32), 10000);
         isAutoReconnecting = false;
+        return; // onConnected() has taken over the UI
       } catch (err) {
-        console.warn('Auto-reconnect failed:', err);
-        isAutoReconnecting = false;
-        ui.status.innerText = 'Tap CONNECT to pair';
-        ui.btnConnect.innerText = 'CONNECT';
-        ui.btnConnect.classList.remove('reconnecting');
+        console.warn(`Auto-connect attempt ${attempt} failed:`, err);
+        try { esp32.gatt.disconnect(); } catch(_) {}
+        if (attempt < 4) await new Promise(r => setTimeout(r, 2000));
       }
-    }, { once: true });
-
-    await esp32.watchAdvertisements({ signal: abortController.signal });
+    }
   } catch (err) {
     console.warn('Auto-reconnect error:', err);
-    isAutoReconnecting = false;
-    ui.status.innerText = 'Tap CONNECT to pair';
-    ui.btnConnect.innerText = 'CONNECT';
-    ui.btnConnect.classList.remove('reconnecting');
   }
+  isAutoReconnecting = false;
+  ui.status.innerText = 'Tap CONNECT to pair';
+  ui.btnConnect.innerText = 'CONNECT';
+  ui.btnConnect.classList.remove('reconnecting');
 }
 
-// Kick off auto-reconnect when the page loads
+// Kick off auto-reconnect when the page loads, and again whenever the app
+// comes back to the foreground without a live connection
 autoReconnect();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && (!bleDevice || !bleDevice.gatt.connected)) {
+    autoReconnect();
+  }
+});
 
 // -- MANUAL BLUETOOTH CONNECTION --
 ui.btnConnect.addEventListener('click', async () => {
