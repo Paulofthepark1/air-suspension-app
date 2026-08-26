@@ -93,10 +93,12 @@
       <div class="modal-content dark">
         <span class="close-btn" id="btn-close-wifi">&times;</span>
         <h2 style="margin-top: 0;">Wi-Fi Setup</h2>
-        <p class="wifi-hint">Saved on the controller and used only when downloading firmware updates.</p>
+        <p class="wifi-hint">Saved on the controller. Only needed for IDE rescue mode — normal updates go over Bluetooth.</p>
         <input type="text" id="wifi-ssid" class="wifi-input" placeholder="Network name (SSID)" autocomplete="off">
         <input type="password" id="wifi-pass" class="wifi-input" placeholder="Password" autocomplete="off">
         <button class="start-btn" id="btn-wifi-save" style="width: 100%; margin-top: 15px; font-size: 1.1rem;">SAVE TO CONTROLLER</button>
+        <p class="wifi-hint" style="margin-top: 20px;">If a firmware update ever fails and won't retry, rescue mode joins Wi-Fi and opens the Arduino IDE network port for 5 minutes.</p>
+        <button class="connect-btn" id="btn-rescue" style="width: 100%;">OPEN IDE RESCUE PORT</button>
       </div>
     </div>
 

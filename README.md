@@ -10,31 +10,41 @@ ESP32-S3 air suspension controller with a Web Bluetooth PWA frontend.
 
 Every merge to `main` that touches the sketch triggers the **Build Firmware**
 GitHub Action, which compiles it with `arduino-cli` for the ESP32-S3 and
-publishes `firmware.bin` to a GitHub Release tagged with the sketch's
-`FW_VERSION`.
+publishes `firmware.bin` + `version.json` (size, MD5) to the orphan
+`firmware` branch, plus a versioned GitHub Release for history.
 
-The app reads the installed firmware version over BLE and checks GitHub for
-the latest release. When a newer version exists, the **UPDATE FIRMWARE**
-button lights up. Tapping it sends `OTA:1`; the ESP32 joins Wi-Fi, downloads
-the latest `firmware.bin` from GitHub Releases over HTTPS, flashes itself,
-and reboots. Progress streams back over the BLE status characteristic.
+The app reads the installed firmware version over BLE and fetches
+`version.json` from the `firmware` branch. When a newer version exists, the
+**UPDATE FIRMWARE** button lights up. Tapping it:
 
-If the download fails, the device keeps an ArduinoOTA (IDE network port)
-rescue window open for 5 minutes before rebooting back to normal mode, and
-the error message is shown in the app on the next connect.
+1. The **phone** downloads `firmware.bin` (so the truck needs no Wi-Fi —
+   cellular works).
+2. The app streams it to the ESP32 **over Bluetooth** in 200-byte chunks
+   with an ack every 64 chunks (`FWBEGIN:<size>:<md5>` → `FWREADY` →
+   chunks → `FWACK:<n>` → `FWEND` → `FWOK`).
+3. The ESP32 writes it to the spare OTA slot, verifies size and MD5, and
+   only then reboots into it. A failed or interrupted transfer aborts
+   harmlessly — the running firmware is untouched.
 
-### Wi-Fi credentials
+The outcome message is persisted across the reboot and shown in the app on
+the next connect.
 
-Credentials are **not** stored in this repo. Use the **WI-FI SETUP** button
-in the app (while connected over Bluetooth) to save them into the ESP32's
-flash. They're only used during firmware updates.
+### Rescue path
+
+If a bad firmware ever makes BLE updates impossible, the Wi-Fi Setup modal
+has **OPEN IDE RESCUE PORT**: the controller joins Wi-Fi (credentials saved
+in its flash via the app — they are not in this repo) and exposes the
+classic ArduinoOTA network port for 5 minutes, so a fix can be pushed from
+the Arduino IDE.
 
 ### Releasing a new firmware version
 
 1. Edit `ESP32_Air_Suspension.ino` and bump `FW_VERSION`.
 2. Merge to `main`.
-3. CI builds and publishes the release; the app offers the update on the
-   next connect.
+3. CI builds and publishes; the app offers the update on the next connect.
+
+CI fails the build if the binary exceeds the 1280KB OTA app slot of the
+default 4MB partition scheme.
 
 ### BLE command reference
 
@@ -42,5 +52,6 @@ flash. They're only used during firmware updates.
 |---|---|
 | `SET:<left>:<right>` | Set target PSI and start the control loop |
 | `DUMP:1` / `DUMP:0` | Open/close the tank dump valve |
-| `WIFI:<ssid>\n<pass>` | Save Wi-Fi credentials to flash |
-| `OTA:1` | Join Wi-Fi and self-update from GitHub Releases |
+| `WIFI:<ssid>\n<pass>` | Save Wi-Fi credentials to flash (rescue mode only) |
+| `FWBEGIN:<size>:<md5>` / chunks / `FWEND` / `FWABORT` | BLE firmware update |
+| `OTA:1` | Rescue mode: join Wi-Fi, open ArduinoOTA IDE port for 5 min |

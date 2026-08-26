@@ -58,7 +58,31 @@ jobs:
             exit 1
           fi
 
-      - name: Publish release
+      - name: Publish to firmware branch
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          SIZE=$(stat -c%s firmware.bin)
+          MD5=$(md5sum firmware.bin | cut -d' ' -f1)
+          printf '{"version":"%s","size":%s,"md5":"%s","commit":"%s","built":"%s"}\n' \
+            "$VERSION" "$SIZE" "$MD5" "$GITHUB_SHA" "$(date -u +%FT%TZ)" > version.json
+          cat version.json
+
+          # The app fetches these via raw.githubusercontent.com (CORS-friendly).
+          # Orphan branch force-pushed each build so binaries never bloat main's history.
+          mkdir fwpub
+          cp firmware.bin version.json fwpub/
+          cd fwpub
+          git init -b firmware
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "firmware v$VERSION (built from $GITHUB_SHA)"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" firmware
+
+      - name: Publish release (versioned archive)
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}

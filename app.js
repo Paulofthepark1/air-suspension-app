@@ -13,18 +13,26 @@ const CHAR_CMD_UUID = "beb5483e-36e3-4688-b7f5-ea07361b26a8";
 const CHAR_GRAPH_UUID = "beb5483e-36e5-4688-b7f5-ea07361b26a8";
 const CHAR_OTA_STATUS_UUID = "beb5483e-36e6-4688-b7f5-ea07361b26a8";
 const CHAR_VERSION_UUID = "beb5483e-36e7-4688-b7f5-ea07361b26a8";
+const CHAR_FW_DATA_UUID = "beb5483e-36e8-4688-b7f5-ea07361b26a8";
 
-// Firmware releases are auto-built from this repo by GitHub Actions
+// Firmware binaries are auto-built from this repo by GitHub Actions and
+// published to the "firmware" branch (raw.githubusercontent serves CORS)
 const GITHUB_REPO = "Paulofthepark1/air-suspension-app";
+const FW_BASE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/firmware`;
+const FW_CHUNK_SIZE = 200;  // bytes per BLE write
+const FW_ACK_EVERY = 64;    // chunks per FWACK (must match the firmware)
 
 let bleDevice = null;
 let cmdCharacteristic = null;
 let graphCharacteristic = null;
 let otaStatusCharacteristic = null;
+let fwDataCharacteristic = null;
 let isAutoReconnecting = false;
 let deviceFwVersion = null;   // null = legacy firmware without version characteristic
-let latestFwVersion = null;   // latest release tag on GitHub, e.g. "2.1.0"
+let latestFwVersion = null;   // latest published firmware version, e.g. "2.1.0"
+let latestFwMeta = null;      // {version, size, md5} from version.json
 let updateInProgress = false;
+let fwTransfer = null;        // active transfer's notify router
 
 // Target state
 let targetLeft = parseInt(localStorage.getItem('targetLeft')) || 0;
@@ -54,7 +62,8 @@ const ui = {
   btnCloseWifi: document.getElementById('btn-close-wifi'),
   btnWifiSave: document.getElementById('btn-wifi-save'),
   wifiSsidInput: document.getElementById('wifi-ssid'),
-  wifiPassInput: document.getElementById('wifi-pass')
+  wifiPassInput: document.getElementById('wifi-pass'),
+  btnRescue: document.getElementById('btn-rescue')
 };
 
 // -- SHARED CONNECTION LOGIC --
@@ -76,14 +85,16 @@ async function connectToDevice(device) {
   graphCharacteristic = await service.getCharacteristic(CHAR_GRAPH_UUID);
   otaStatusCharacteristic = await service.getCharacteristic(CHAR_OTA_STATUS_UUID);
 
-  // Firmware version characteristic only exists on v2+ firmware
+  // Firmware version + data characteristics only exist on v2+ firmware
   deviceFwVersion = null;
+  fwDataCharacteristic = null;
   try {
     const versionChar = await service.getCharacteristic(CHAR_VERSION_UUID);
     const verVal = await versionChar.readValue();
     deviceFwVersion = new TextDecoder('utf-8').decode(verVal).trim();
+    fwDataCharacteristic = await service.getCharacteristic(CHAR_FW_DATA_UUID);
   } catch(e) {
-    console.log("No version characteristic — legacy firmware.");
+    console.log("No version/fw-data characteristic — legacy firmware.");
   }
 
   // Check for status left over from the last update attempt
@@ -449,13 +460,15 @@ function isNewerVersion(a, b) {
 
 async function checkLatestFirmware() {
   try {
-    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
+    const res = await fetch(`${FW_BASE_URL}/version.json?t=${Date.now()}`);
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const release = await res.json();
-    latestFwVersion = (release.tag_name || "").replace(/^v/, '');
+    const meta = await res.json();
+    latestFwVersion = (meta.version || "").replace(/^v/, '');
+    latestFwMeta = meta;
   } catch(e) {
     console.warn("Could not check GitHub for latest firmware", e);
     latestFwVersion = null;
+    latestFwMeta = null;
   }
   updateFirmwareUI();
 }
@@ -485,36 +498,131 @@ function updateFirmwareUI() {
 
 function handleOtaStatusNotify(event) {
   const msg = new TextDecoder('utf-8').decode(event.target.value);
-  if (msg.startsWith("UPDATING:")) {
-    updateInProgress = true;
-    ui.status.innerText = `Installing firmware... ${msg.substring(9)}%`;
-  } else if (msg.trim() !== "") {
-    ui.status.innerText = msg;
-    if (msg.startsWith("Update failed")) updateInProgress = false;
+  if (msg.trim() === "") return;
+  // Let an active transfer consume its protocol messages first
+  if (fwTransfer && fwTransfer.onMessage(msg)) return;
+  ui.status.innerText = msg;
+  if (msg.startsWith("Update failed") || msg.startsWith("FWERR:")) updateInProgress = false;
+}
+
+// Stream the firmware image to the ESP32 over BLE.
+// Protocol: FWBEGIN:<size>:<md5> → FWREADY → 200B chunks with an FWACK
+// every 64 chunks → FWEND → FWOK + reboot. Any FWERR aborts.
+async function installFirmware(meta) {
+  const encoder = new TextEncoder('utf-8');
+
+  ui.status.innerText = 'Downloading firmware...';
+  const res = await fetch(`${FW_BASE_URL}/firmware.bin?t=${Date.now()}`);
+  if (!res.ok) throw new Error("Download failed (HTTP " + res.status + ")");
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength !== meta.size) {
+    throw new Error(`Downloaded size ${buf.byteLength} doesn't match expected ${meta.size}`);
+  }
+
+  updateInProgress = true;
+  let waiter = null;
+  const waitFor = (test, timeoutMs, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { waiter = null; reject(new Error(label + " timed out")); }, timeoutMs);
+    waiter = {
+      test,
+      resolve: (m) => { clearTimeout(timer); waiter = null; resolve(m); },
+      reject: (m) => { clearTimeout(timer); waiter = null; reject(new Error(m)); }
+    };
+  });
+  fwTransfer = {
+    onMessage(msg) {
+      if (msg.startsWith("FWERR:")) {
+        if (waiter) waiter.reject(msg);
+        return true;
+      }
+      if (waiter && waiter.test(msg)) {
+        waiter.resolve(msg);
+        return true;
+      }
+      // Swallow stray protocol messages so they don't clobber the status line
+      return msg === "FWREADY" || msg === "FWOK" || msg.startsWith("FWACK:");
+    }
+  };
+
+  try {
+    const readyPromise = waitFor(m => m === "FWREADY", 10000, "Update start");
+    await cmdCharacteristic.writeValue(encoder.encode(`FWBEGIN:${buf.byteLength}:${meta.md5}`));
+    await readyPromise;
+
+    const canWriteNR = typeof fwDataCharacteristic.writeValueWithoutResponse === 'function';
+    let sent = 0;
+    let chunkIdx = 0;
+    while (sent < buf.byteLength) {
+      const chunk = new Uint8Array(buf, sent, Math.min(FW_CHUNK_SIZE, buf.byteLength - sent));
+      chunkIdx++;
+      // Register the ack waiter before sending the chunk that triggers it
+      const ackPromise = (chunkIdx % FW_ACK_EVERY === 0)
+        ? waitFor(m => m.startsWith("FWACK:"), 15000, "Transfer ack")
+        : null;
+      if (canWriteNR) {
+        await fwDataCharacteristic.writeValueWithoutResponse(chunk);
+      } else {
+        await fwDataCharacteristic.writeValue(chunk);
+      }
+      sent += chunk.length;
+      if (ackPromise) {
+        const ack = await ackPromise;
+        const acked = parseInt(ack.substring(6));
+        if (acked !== sent) throw new Error(`Transfer out of sync (device got ${acked}, sent ${sent})`);
+        ui.status.innerText = `Installing firmware... ${Math.round(sent * 100 / buf.byteLength)}%`;
+      }
+    }
+
+    ui.status.innerText = 'Verifying and flashing...';
+    const okPromise = waitFor(m => m === "FWOK" || m.startsWith("Firmware update installed"), 30000, "Finalize");
+    await cmdCharacteristic.writeValue(encoder.encode("FWEND"));
+    await okPromise;
+    ui.status.innerText = 'Update installed — device rebooting...';
+  } catch (e) {
+    try { await cmdCharacteristic.writeValue(encoder.encode("FWABORT")); } catch(_) {}
+    updateInProgress = false;
+    throw e;
+  } finally {
+    fwTransfer = null;
   }
 }
 
 ui.btnOta.addEventListener('click', async () => {
   if (!cmdCharacteristic) return;
+  if (updateInProgress) return;
 
-  let prompt;
-  if (!deviceFwVersion) {
-    prompt = "This will connect the ESP32 to Wi-Fi and open the Arduino IDE network port for a one-time manual update. Proceed?";
-  } else if (latestFwVersion && isNewerVersion(latestFwVersion, deviceFwVersion)) {
-    prompt = `Download and install firmware v${latestFwVersion} from GitHub? The device will reboot when done (about 1-3 minutes). Make sure the truck is parked in Wi-Fi range.`;
-  } else {
-    prompt = "Firmware already looks up to date. Reinstall the latest version anyway?";
+  // Legacy v1 firmware: only the Wi-Fi + Arduino IDE path exists
+  if (!deviceFwVersion || !fwDataCharacteristic) {
+    if (confirm("This will connect the ESP32 to Wi-Fi and open the Arduino IDE network port for a one-time manual update. Proceed?")) {
+      try {
+        const encoder = new TextEncoder('utf-8');
+        await cmdCharacteristic.writeValue(encoder.encode("OTA:1"));
+        ui.status.innerText = "Switching to OTA mode...";
+      } catch(e) {
+        console.error("Write error", e);
+      }
+    }
+    return;
   }
 
-  if (confirm(prompt)) {
-    try {
-      const encoder = new TextEncoder('utf-8');
-      await cmdCharacteristic.writeValue(encoder.encode("OTA:1"));
-      updateInProgress = true;
-      ui.status.innerText = "Connecting to Wi-Fi for update...";
-    } catch(e) {
-      console.error("Write error", e);
-    }
+  if (!latestFwMeta) {
+    alert("Couldn't reach GitHub to check for firmware. Check your internet connection.");
+    return;
+  }
+
+  const isUpdate = latestFwVersion && isNewerVersion(latestFwVersion, deviceFwVersion);
+  const sizeMb = (latestFwMeta.size / 1048576).toFixed(1);
+  const prompt = isUpdate
+    ? `Install firmware v${latestFwVersion}? Your phone downloads it (~${sizeMb} MB) and sends it over Bluetooth — takes a few minutes. Keep the app open and stay near the truck.`
+    : "Firmware already looks up to date. Reinstall the latest version anyway?";
+
+  if (!confirm(prompt)) return;
+  try {
+    await installFirmware(latestFwMeta);
+  } catch (e) {
+    console.error("Firmware install failed", e);
+    ui.status.innerText = 'Update failed: ' + e.message;
+    alert("Firmware update failed: " + e.message + "\n\nThe controller is still running its current firmware — you can retry.");
   }
 });
 
@@ -553,6 +661,20 @@ ui.btnWifiSave.addEventListener('click', async () => {
   } catch(e) {
     console.error("Wi-Fi save error", e);
     alert("Failed to send Wi-Fi credentials: " + e.message);
+  }
+});
+
+ui.btnRescue.addEventListener('click', async () => {
+  if (!cmdCharacteristic) return;
+  if (confirm("Rescue mode: the controller joins Wi-Fi and opens the Arduino IDE network port for 5 minutes, then reboots. Continue?")) {
+    try {
+      const encoder = new TextEncoder('utf-8');
+      await cmdCharacteristic.writeValue(encoder.encode("OTA:1"));
+      ui.wifiModal.style.display = "none";
+      ui.status.innerText = "Opening IDE rescue port...";
+    } catch(e) {
+      console.error("Rescue error", e);
+    }
   }
 });
 
