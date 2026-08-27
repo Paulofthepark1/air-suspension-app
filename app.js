@@ -338,16 +338,26 @@ function onDisconnected() {
 }
 
 // -- SENSOR HANDLING --
+// Latest live readings also feed the graph (see the live-append timer)
+let liveL = null, liveR = null, liveTk = null;
+
+function psiOrNull(str) {
+  const v = parseInt(str);
+  return isFinite(v) && v >= 0 && v <= 250 ? v : null;
+}
+
 function handleLeftPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valLeft.innerText = value;
+  liveL = psiOrNull(value);
 }
 
 function handleRightPsi(event) {
   const decoder = new TextDecoder('utf-8');
   let value = decoder.decode(event.target.value);
   ui.valRight.innerText = value;
+  liveR = psiOrNull(value);
 }
 
 function handleTankPsi(event) {
@@ -356,6 +366,7 @@ function handleTankPsi(event) {
   if (ui.valTank) {
     ui.valTank.innerText = value;
   }
+  liveTk = psiOrNull(value);
 }
 
 // -- TARGET CONTROLS LOGIC --
@@ -567,14 +578,17 @@ function updateFirmwareUI() {
   const current = deviceFwVersion ? `v${deviceFwVersion}` : 'v1 (legacy)';
   let info = `Firmware ${current}`;
   ui.btnOta.classList.remove('update-available');
+  ui.btnOta.style.backgroundColor = '#555'; // orange only when action needed
 
   if (!deviceFwVersion) {
     // Legacy firmware: OTA:1 opens the Arduino IDE network port only
     ui.btnOta.innerText = 'ENABLE OTA UPDATE (IDE)';
+    ui.btnOta.style.backgroundColor = '#ff9800';
     if (latestFwVersion) info += ` — v${latestFwVersion} available via IDE`;
   } else if (latestFwVersion && isNewerVersion(latestFwVersion, deviceFwVersion)) {
     ui.btnOta.innerText = `INSTALL UPDATE v${latestFwVersion}`;
     ui.btnOta.classList.add('update-available');
+    ui.btnOta.style.backgroundColor = '#ff9800';
     info += ` — update available!`;
   } else if (latestFwVersion) {
     ui.btnOta.innerText = 'FIRMWARE UP TO DATE';
@@ -946,25 +960,56 @@ function parseAndSaveGraphData(csvStr) {
   incoming.forEach(p => byTime.set(p.t, p));
   historyData = [...byTime.values()].sort((a, b) => a.t - b.t);
 
+  saveHistory();
+
+  if (ui.graphModal.style.display === "block") {
+    graphScheduleDraw();
+  }
+}
+
+let lastHistorySave = 0;
+
+function saveHistory() {
   const cutoff = Date.now() - HISTORY_KEEP_MS;
   if (historyData.length && historyData[0].t < cutoff) {
     historyData = historyData.filter(p => p.t >= cutoff);
   }
-
   try {
     localStorage.setItem('pressureHistory', historyData.map(p => {
       const cols = [Math.floor(p.t / 1000), p.l ?? '', p.r ?? '', p.tk ?? ''];
       if (p.sl != null || p.sr != null) cols.push(p.sl ?? '', p.sr ?? '');
       return cols.join(',');
     }).join('\n'));
+    lastHistorySave = Date.now();
   } catch(e) {
     console.warn("Could not persist history", e);
   }
+}
+
+// While connected, feed live readings into the graph every 30s so it
+// tracks "now" instead of freezing at the connect-time sync. The device's
+// own 1-minute log still covers time spent with the app closed.
+setInterval(() => {
+  if (!cmdCharacteristic || updateInProgress) return;
+  if (liveL == null && liveR == null && liveTk == null) return;
+
+  const t = Date.now();
+  const prevLast = historyData.length ? historyData[historyData.length - 1].t : 0;
+  historyData.push({ t, l: liveL, r: liveR, tk: liveTk, sl: null, sr: null });
+
+  // Persist occasionally — a lost tail is re-covered by the next device sync
+  if (t - lastHistorySave > 300000) saveHistory();
 
   if (ui.graphModal.style.display === "block") {
+    // Follow mode: if the view was pinned at the newest data, slide along
+    if (graph.view.end >= prevLast - 60000) {
+      const span = graph.view.end - graph.view.start;
+      graph.view.end = t;
+      graph.view.start = t - span;
+    }
     graphScheduleDraw();
   }
-}
+}, 30000);
 
 // -- GRAPH RENDERER --
 // Custom canvas chart: drag to pan, pinch/scroll to zoom (time axis),
