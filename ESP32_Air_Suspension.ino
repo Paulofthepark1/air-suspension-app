@@ -21,7 +21,7 @@
 #include <Preferences.h>
 #include <Update.h>
 
-#define FW_VERSION "2.1.1"
+#define FW_VERSION "2.1.2"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -884,20 +884,30 @@ void loop() {
     unsigned long currentEpoch = bootTimestamp + (millis() / 1000);
 
     // Rolling buffer: the app archives on every connect, so once the file
-    // gets big just start fresh instead of filling LittleFS
+    // gets big just start fresh instead of filling LittleFS.
+    // Also check the last byte: a power cut mid-write leaves a partial row
+    // with no newline, and appending onto it would glue two rows together
+    // into a corrupt timestamp.
+    bool needsNewline = false;
     if (!isStreamingGraph) {
       File check = LittleFS.open("/history.csv", FILE_READ);
       if (check) {
         size_t sz = check.size();
+        if (sz > 0) {
+          check.seek(sz - 1);
+          needsNewline = (check.read() != '\n');
+        }
         check.close();
         if (sz > HISTORY_MAX_BYTES) {
           LittleFS.remove("/history.csv");
+          needsNewline = false;
           Serial.println("History buffer full — starting a fresh file.");
         }
       }
     }
 
     File file = LittleFS.open("/history.csv", FILE_APPEND);
+    if (file && needsNewline) file.print("\n");
     if (file) {
         char logStr[80];
         sprintf(logStr, "%lu,%d,%d,%d,%d,%d\n", currentEpoch,
