@@ -876,20 +876,29 @@ let graphBuffer = "";
 let historyData = []; // [{t(ms), l, r, tk, sl, sr}] sorted by t
 const HISTORY_KEEP_MS = 45 * 24 * 3600 * 1000; // ~6 weeks fits localStorage
 
+// A power cut mid-write can glue two log lines together on the device,
+// producing absurd timestamps/values — reject anything implausible.
+const HISTORY_T_MIN = Date.parse('2020-01-01');
+
 function parseCsvRows(csvStr) {
   const rows = [];
+  const tMax = Date.now() + 48 * 3600 * 1000;
+  const cleanPsi = (s) => {
+    const v = parseInt(s);
+    return isFinite(v) && v >= 0 && v <= 250 ? v : null;
+  };
   for (const line of (csvStr || "").split('\n')) {
     const parts = line.trim().split(',');
     if (parts.length < 4) continue;
     const t = parseInt(parts[0]) * 1000;
-    if (!isFinite(t) || t <= 0) continue;
+    if (!isFinite(t) || t < HISTORY_T_MIN || t > tMax) continue;
     rows.push({
       t,
-      l: parseInt(parts[1]),
-      r: parseInt(parts[2]),
-      tk: parseInt(parts[3]),
-      sl: parts.length >= 6 ? parseInt(parts[4]) : null,
-      sr: parts.length >= 6 ? parseInt(parts[5]) : null
+      l: cleanPsi(parts[1]),
+      r: cleanPsi(parts[2]),
+      tk: cleanPsi(parts[3]),
+      sl: parts.length >= 6 ? cleanPsi(parts[4]) : null,
+      sr: parts.length >= 6 ? cleanPsi(parts[5]) : null
     });
   }
   return rows;
@@ -932,10 +941,11 @@ function parseAndSaveGraphData(csvStr) {
   }
 
   try {
-    localStorage.setItem('pressureHistory', historyData.map(p =>
-      `${Math.floor(p.t / 1000)},${p.l},${p.r},${p.tk},${p.sl == null ? '' : p.sl + ',' + p.sr}`
-        .replace(/,$/, '')
-    ).join('\n'));
+    localStorage.setItem('pressureHistory', historyData.map(p => {
+      const cols = [Math.floor(p.t / 1000), p.l ?? '', p.r ?? '', p.tk ?? ''];
+      if (p.sl != null || p.sr != null) cols.push(p.sl ?? '', p.sr ?? '');
+      return cols.join(',');
+    }).join('\n'));
   } catch(e) {
     console.warn("Could not persist history", e);
   }
@@ -1108,7 +1118,7 @@ function drawGraph() {
   // X ticks: pick a step giving ~4-6 labels
   const spanS = (end - start) / 1000;
   const xStepS = niceStep(spanS / 5,
-    [60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800]);
+    [60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 2592000, 7776000, 31536000]);
   const xStepMs = xStepS * 1000;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
