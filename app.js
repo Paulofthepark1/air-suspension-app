@@ -187,6 +187,7 @@ async function autoReconnect() {
     const esp32 = devices.find(d => d.name && d.name === 'Air Bags');
     if (!esp32) {
       console.log('No previously paired ESP32 found.');
+      ui.status.innerText = 'Tap CONNECT to pair';
       return;
     }
 
@@ -196,36 +197,40 @@ async function autoReconnect() {
     ui.btnConnect.innerText = 'CONNECTING...';
     ui.btnConnect.classList.add('reconnecting');
 
-    // ~4 attempts x (10s cap + 2s pause) also covers the reboot after a
-    // firmware update
-    for (let attempt = 1; attempt <= 4; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        await withTimeout(connectToDevice(esp32), 10000);
+        await withTimeout(connectToDevice(esp32), 8000);
         isAutoReconnecting = false;
         return; // onConnected() has taken over the UI
       } catch (err) {
         console.warn(`Auto-connect attempt ${attempt} failed:`, err);
         try { esp32.gatt.disconnect(); } catch(_) {}
-        if (attempt < 4) await new Promise(r => setTimeout(r, 2000));
+        if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
       }
     }
   } catch (err) {
     console.warn('Auto-reconnect error:', err);
   }
   isAutoReconnecting = false;
-  ui.status.innerText = 'Tap CONNECT to pair';
+  // The retry timer below keeps searching — walking into range is enough
+  ui.status.innerText = 'Searching for Air Bags...';
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnConnect.classList.remove('reconnecting');
 }
 
-// Kick off auto-reconnect when the page loads, and again whenever the app
-// comes back to the foreground without a live connection
+// Keep trying for as long as the app is open and disconnected: on load,
+// whenever the app returns to the foreground, and every 15s in between.
 autoReconnect();
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && (!bleDevice || !bleDevice.gatt.connected)) {
     autoReconnect();
   }
 });
+setInterval(() => {
+  if (!document.hidden && !isAutoReconnecting && (!bleDevice || !bleDevice.gatt.connected)) {
+    autoReconnect();
+  }
+}, 15000);
 
 // -- MANUAL BLUETOOTH CONNECTION --
 ui.btnConnect.addEventListener('click', async () => {
@@ -252,6 +257,7 @@ ui.btnConnect.addEventListener('click', async () => {
 });
 
 function onConnected() {
+  document.body.classList.remove('disconnected');
   ui.status.innerText = 'Connected';
   ui.btnConnect.classList.remove('reconnecting');
   ui.btnConnect.classList.add('connected');
@@ -295,11 +301,16 @@ function supportsIncrementalSync() {
 }
 
 function onDisconnected() {
+  document.body.classList.add('disconnected');
   if (updateInProgress) {
     ui.status.innerText = 'Installing update — reconnecting shortly...';
   } else {
     ui.status.innerText = 'Disconnected';
   }
+  // Don't show stale readings on the next connect
+  ui.valLeft.innerText = '---';
+  ui.valRight.innerText = '---';
+  if (ui.valTank) ui.valTank.innerText = '---';
   ui.btnConnect.classList.remove('connected');
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnStart.classList.add('disabled');
