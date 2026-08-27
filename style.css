@@ -316,7 +316,12 @@ body.daily-mode #btn-sync {
 
 .connect-container {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  max-width: 340px;
+  margin: 0 auto;
   padding-bottom: 30px;
 }
 
