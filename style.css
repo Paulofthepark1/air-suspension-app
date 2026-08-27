@@ -245,6 +245,23 @@ body, html {
   min-height: 1.2em;
 }
 
+/* Disconnected: clean screen — just the status and CONNECT */
+body.disconnected .controls-container,
+body.disconnected .action-container,
+body.disconnected .tank-container,
+body.disconnected .daily-panel,
+body.disconnected #mode-banner,
+body.disconnected #btn-sync,
+body.disconnected #btn-mode,
+body.disconnected #btn-dump {
+  display: none !important;
+}
+
+body.disconnected .connect-container {
+  margin-top: auto;
+  margin-bottom: auto;
+}
+
 /* Daily mode hides all manual pressure controls */
 body.daily-mode .arrow-btn,
 body.daily-mode .psi-target,
