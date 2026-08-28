@@ -1207,7 +1207,7 @@ const GRAPH_SERIES = [
   { key: 'sr', label: 'Set R', color: '#dc55a8', dash: [6, 4] }
 ];
 const GRAPH_GAP_MS = 5 * 60 * 1000;   // break the line across logging gaps
-const GRAPH_MIN_SPAN = 2 * 60 * 1000; // max zoom-in: 2 minutes
+const GRAPH_MIN_SPAN = 30 * 1000;     // max zoom-in: 30s (individual samples)
 const GRAPH_MARGIN = { l: 38, r: 14, t: 10, b: 26 };
 
 const graph = {
@@ -1279,6 +1279,7 @@ function fmtTick(t, stepMs) {
   const d = new Date(t);
   const hm = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
   if (stepMs >= 86400000) return (d.getMonth() + 1) + '/' + d.getDate();
+  if (stepMs < 60000) return hm + ':' + d.getSeconds().toString().padStart(2, '0');
   return hm;
 }
 
@@ -1287,6 +1288,36 @@ function fmtTipTime(t) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return `${months[d.getMonth()]} ${d.getDate()}, ` +
     d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+}
+
+// Classify an event code as a valve-marker: direction (in=fill / out=release),
+// side (L/R/T), and whether it was a capped fill attempt
+const GRAPH_SIDE_COLORS = { L: '#2fa84f', R: '#dc55a8', T: '#3b82f6' };
+const GRAPH_CAP_COLOR = '#ff9800';
+
+function eventMarkerInfo(code) {
+  const p0 = code.split(':')[0];
+  if (p0.startsWith('DFILLCAP')) return { dir: 'in', side: p0.slice(-1), cap: true };
+  if (p0.startsWith('DFILL') || p0.startsWith('TFILL')) return { dir: 'in', side: p0.slice(-1) };
+  if (p0.startsWith('DDEFL') || p0.startsWith('TDEFL')) return { dir: 'out', side: p0.slice(-1) };
+  if (p0 === 'DUMP') return { dir: 'out', side: 'T' };
+  return null;
+}
+
+function drawTriangle(ctx, x, y, up, color, size) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  if (up) {
+    ctx.moveTo(x, y - size);
+    ctx.lineTo(x - size, y + size);
+    ctx.lineTo(x + size, y + size);
+  } else {
+    ctx.moveTo(x, y + size);
+    ctx.lineTo(x - size, y - size);
+    ctx.lineTo(x + size, y - size);
+  }
+  ctx.closePath();
+  ctx.fill();
 }
 
 function drawGraph() {
@@ -1359,7 +1390,7 @@ function drawGraph() {
   // X ticks: pick a step giving ~4-6 labels
   const spanS = (end - start) / 1000;
   const xStepS = niceStep(spanS / 5,
-    [60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 2592000, 7776000, 31536000]);
+    [10, 30, 60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 2592000, 7776000, 31536000]);
   const xStepMs = xStepS * 1000;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -1430,6 +1461,29 @@ function drawGraph() {
   }
   ctx.restore();
 
+  // Valve-event markers: bottom lane, ▲ = fill (air in), ▼ = release (air
+  // out); green=left, magenta=right, blue=tank dump, orange=capped fill.
+  // Left/right sit on separate sub-rows so simultaneous events stay visible.
+  if (!graph.hidden.ev && eventData.length) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plotX, plotY, plotW, plotH);
+    ctx.clip();
+    const laneL = plotY + plotH - 24;
+    const laneT = plotY + plotH - 16;
+    const laneR = plotY + plotH - 8;
+    const e0 = lowerBound(eventData, start);
+    for (let i = e0; i < eventData.length && eventData[i].t <= end; i++) {
+      const m = eventMarkerInfo(eventData[i].code);
+      if (!m) continue;
+      const x = xOf(eventData[i].t);
+      const y = m.side === 'L' ? laneL : (m.side === 'T' ? laneT : laneR);
+      const color = m.cap ? GRAPH_CAP_COLOR : (GRAPH_SIDE_COLORS[m.side] || '#888');
+      drawTriangle(ctx, x, y, m.dir === 'in', color, 4.5);
+    }
+    ctx.restore();
+  }
+
   // Direct labels for the solid series at the right edge (ink text, nudged apart)
   labelSpots.sort((a, b) => a.y - b.y);
   for (let i = 1; i < labelSpots.length; i++) {
@@ -1483,6 +1537,20 @@ function drawGraphCursor(xOf, yOf, plotX, plotY, plotW, plotH) {
     ctx.arc(x, yOf(v), 3.5, 0, Math.PI * 2);
     ctx.fill();
     html += `<div class="tip-row"><span class="tip-dot" style="background:${s.color}"></span>${s.label}: ${v} PSI</div>`;
+  }
+
+  // Valve events near the crosshair, spelled out
+  if (!graph.hidden.ev && eventData.length) {
+    const tol = Math.max(45000, (end - start) * 0.01);
+    let shown = 0;
+    for (const e of eventData) {
+      if (e.t < p.t - tol || e.t > p.t + tol) continue;
+      const m = eventMarkerInfo(e.code);
+      if (!m) continue;
+      if (++shown > 4) break;
+      const color = m.cap ? GRAPH_CAP_COLOR : (GRAPH_SIDE_COLORS[m.side] || '#888');
+      html += `<div class="tip-row"><span style="color:${color}">${m.dir === 'in' ? '&#9650;' : '&#9660;'}</span>${humanizeEvent(e.code).text}</div>`;
+    }
   }
   tip.innerHTML = html;
   tip.style.display = 'block';
@@ -1605,6 +1673,17 @@ function initGraph() {
     });
     legend.appendChild(chip);
   }
+
+  // Valve-event marker toggle (▲ fill / ▼ release, colored by side)
+  const evChip = document.createElement('button');
+  evChip.className = 'legend-chip';
+  evChip.innerHTML = `<span style="color:#2fa84f">&#9650;</span><span style="color:#dc55a8">&#9660;</span>Valves`;
+  evChip.addEventListener('click', () => {
+    graph.hidden.ev = !graph.hidden.ev;
+    evChip.classList.toggle('off', !!graph.hidden.ev);
+    graphScheduleDraw();
+  });
+  legend.appendChild(evChip);
 
   window.addEventListener('resize', () => {
     if (ui.graphModal.style.display === "block") graphScheduleDraw();
