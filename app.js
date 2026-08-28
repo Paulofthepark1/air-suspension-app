@@ -655,6 +655,11 @@ function handleOtaStatusNotify(event) {
   // Let an active transfer consume its protocol messages first
   if (fwTransfer && fwTransfer.onMessage(msg)) return;
   if (msg.startsWith("STATS:")) {
+    try { localStorage.setItem('lastStats', msg.substring(6)); } catch(_) {}
+    if (statsForReport) {
+      statsForReport = false; // silent capture for the diagnostics report
+      return;
+    }
     const pairs = msg.substring(6).split(',').map(kv => kv.split('='));
     const names = { Lin: 'Left fill', Lout: 'Left release', Rin: 'Right fill', Rout: 'Right release', Dump: 'Tank dump' };
     alert("Lifetime valve actuations:\n" +
@@ -1645,6 +1650,67 @@ ui.btnStats.addEventListener('click', async () => {
     console.error("Stats request failed", e);
   }
 });
+
+// -- SEND LOGS TO CLAUDE --
+// Compiles a diagnostic report and opens it as a pre-filled GitHub issue
+// on the repo. One tap + Submit; Claude reads and analyzes it from there.
+let statsForReport = false;
+
+function buildDiagnosticsReport() {
+  const lines = [];
+  lines.push(`Generated: ${new Date().toString()}`);
+  lines.push(`Firmware: ${deviceFwVersion ? 'v' + deviceFwVersion : 'unknown'} | Mode: ${modeInfo ? (modeInfo.daily ? 'DAILY (target ' + modeInfo.target + ' PSI, ' + modeInfo.status + ')' : 'TOW') : 'unknown'} | Connected: ${!!cmdCharacteristic}`);
+  lines.push(`Live PSI: L=${liveL ?? '-'} R=${liveR ?? '-'} Tank=${liveTk ?? '-'}`);
+  let stats = null;
+  try { stats = localStorage.getItem('lastStats'); } catch(_) {}
+  lines.push(`Valve counters (lifetime): ${stats || 'not captured yet'}`);
+
+  const wk = Date.now() - 7 * 86400000;
+  const ev7 = eventData.filter(e => e.t >= wk);
+  const count = pfx => ev7.filter(e => e.code.startsWith(pfx)).length;
+  const reboots = {};
+  ev7.filter(e => e.code.startsWith('BOOT')).forEach(e => {
+    const r = e.code.split(':')[1] || '?';
+    reboots[r] = (reboots[r] || 0) + 1;
+  });
+  lines.push(`Last 7d: fillsL=${count('DFILLL') + count('TFILLL')} fillsR=${count('DFILLR') + count('TFILLR')} deflates=${count('DDEFL') + count('TDEFL')} cappedFills=${count('DFILLCAP')} warnings=${count('WARN')} dumps=${count('DUMP')}`);
+  lines.push(`Reboots last 7d by reason: ${Object.keys(reboots).length ? Object.entries(reboots).map(([k, v]) => `${k}=${v}`).join(' ') : 'none'}`);
+
+  const day = Date.now() - 86400000;
+  const rows24 = historyData.filter(p => p.t >= day).length;
+  lines.push(`History rows last 24h: ${rows24} (~1440 = continuous logging)`);
+  lines.push('');
+  lines.push('Recent events (newest first):');
+  lines.push('```');
+  const ev = eventData.slice(-150).reverse();
+  for (const e of ev) lines.push(`${new Date(e.t).toISOString()} ${e.code}`);
+  lines.push('```');
+
+  // Fit within GitHub's URL limits by trimming the oldest events
+  let body = lines.join('\n');
+  while (encodeURIComponent(body).length > 5800 && lines.length > 12) {
+    lines.splice(lines.length - 2, 1); // keep the closing ```
+    body = lines.join('\n');
+  }
+  return body;
+}
+
+async function sendLogsToClaude() {
+  // Grab fresh valve counters first if we're connected
+  if (cmdCharacteristic) {
+    try {
+      statsForReport = true;
+      await cmdCharacteristic.writeValue(new TextEncoder('utf-8').encode("STATS"));
+      await new Promise(r => setTimeout(r, 1200));
+    } catch(_) {}
+    statsForReport = false;
+  }
+  const title = `Diagnostics report ${new Date().toISOString().substring(0, 16).replace('T', ' ')}`;
+  const url = `https://github.com/${GITHUB_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(buildDiagnosticsReport())}`;
+  window.open(url, '_blank');
+}
+
+document.getElementById('btn-send-logs').addEventListener('click', sendLogsToClaude);
 
 window.addEventListener('click', (event) => {
   if (event.target == ui.graphModal) {
