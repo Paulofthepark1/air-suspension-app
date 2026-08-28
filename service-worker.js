@@ -1,4 +1,4 @@
-const CACHE_NAME = 'air-suspension-cache-v8';
+const CACHE_NAME = 'air-suspension-cache-v9';
 const APP_SHELL = [
   './',
   './index.html',

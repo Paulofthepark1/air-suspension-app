@@ -22,7 +22,7 @@
 #include <Update.h>
 #include <esp_system.h>
 
-#define FW_VERSION "2.3.1"
+#define FW_VERSION "2.3.2"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -220,6 +220,29 @@ const size_t EVENTS_MAX_BYTES = 100 * 1024;
 struct PendingEvent { unsigned long ms; char code[48]; };
 PendingEvent pendingEvents[20];
 int pendingEventCount = 0;
+
+// History rows logged before a phone has synced the clock: buffered in a
+// RAM ring (up to 6h) with boot-relative time and back-stamped with real
+// epochs at the next TIME sync — so reboot gaps in the graph self-heal.
+struct PendingRow { uint32_t ms; int16_t l, r, tk, sl, sr; };
+const int PENDING_ROWS_MAX = 360;
+PendingRow pendingRows[PENDING_ROWS_MAX];
+int pendingRowCount = 0;
+int pendingRowHead = 0;
+
+void flushPendingRows() {
+  if (pendingRowCount == 0 || !timeSet) return;
+  File f = LittleFS.open("/history.csv", FILE_APPEND);
+  if (f) {
+    int start = (pendingRowHead - pendingRowCount + PENDING_ROWS_MAX) % PENDING_ROWS_MAX;
+    for (int i = 0; i < pendingRowCount; i++) {
+      PendingRow &p = pendingRows[(start + i) % PENDING_ROWS_MAX];
+      f.printf("%lu,%d,%d,%d,%d,%d\n", bootTimestamp + p.ms / 1000, p.l, p.r, p.tk, p.sl, p.sr);
+    }
+    f.close();
+  }
+  pendingRowCount = 0;
+}
 
 void writeEventRow(unsigned long epoch, const char* code) {
   File check = LittleFS.open("/events.csv", FILE_READ);
@@ -731,17 +754,8 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
          Serial.print("Time set! Boot epoch: ");
          Serial.println(bootTimestamp);
       }
-      else if (rxValue.startsWith("GETEV")) {
-         graphSinceEpoch = 0;
-         if (rxValue.startsWith("GETEV:")) {
-           graphSinceEpoch = strtoul(rxValue.c_str() + 6, NULL, 10);
-         }
-         graphPendingLine = "";
-         isStreamingGraph = true;
-         streamingFile = LittleFS.open("/events.csv", FILE_READ);
-      }
-      else if (rxValue.startsWith("GET")) {
-         // "GET" streams everything; "GET:<epoch>" only rows newer than epoch
+      else if (rxValue.startsWith("GET") && !rxValue.startsWith("GETEV")) {
+         flushPendingRows(); // make buffered rows part of this sync
          graphSinceEpoch = 0;
          if (rxValue.startsWith("GET:")) {
            graphSinceEpoch = strtoul(rxValue.c_str() + 4, NULL, 10);
@@ -751,6 +765,15 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
          graphPendingLine = "";
          isStreamingGraph = true;
          streamingFile = LittleFS.open("/history.csv", FILE_READ);
+      }
+      else if (rxValue.startsWith("GETEV")) {
+         graphSinceEpoch = 0;
+         if (rxValue.startsWith("GETEV:")) {
+           graphSinceEpoch = strtoul(rxValue.c_str() + 6, NULL, 10);
+         }
+         graphPendingLine = "";
+         isStreamingGraph = true;
+         streamingFile = LittleFS.open("/events.csv", FILE_READ);
       }
       else if (rxValue.startsWith("CLEAR")) {
          LittleFS.remove("/history.csv");
@@ -924,8 +947,13 @@ void loop() {
   // --- 1. SENSOR READING & NOTIFICATION ---
   // Runs whether or not a phone is connected: DAILY maintenance needs
   // live readings on its own. Notifies only reach a connected client.
+  // While a daily valve is open, sample and service at 10Hz — at 1Hz a
+  // fill from a full tank overshoots the target by several PSI before
+  // the valve can close (seen in the field: 8 -> 13-14 with target 10).
   if (!fwReceiving) {
-    if (millis() - lastSensorUpdate > 500) {
+    bool dailyValveActive = dailyFillingL || dailyFillingR || dailyDeflatingL || dailyDeflatingR;
+    if (timeSet && pendingRowCount > 0) flushPendingRows();
+    if (millis() - lastSensorUpdate > (dailyValveActive ? 100UL : 500UL)) {
       lastSensorUpdate = millis();
 
       // LEFT SENSOR on Pin 34 (ADC1)
@@ -1024,8 +1052,9 @@ void loop() {
       }
     }
 
-    // --- 2a. DAILY MODE MAINTENANCE (1s cadence, phone optional) ---
-    if (driveMode == MODE_DAILY && drainPhase == DRAIN_OFF && millis() - lastDailyCheck > 1000) {
+    // --- 2a. DAILY MODE MAINTENANCE (1s idle, 100ms while valves open) ---
+    if (driveMode == MODE_DAILY && drainPhase == DRAIN_OFF &&
+        millis() - lastDailyCheck > (dailyValveActive ? 100UL : 1000UL)) {
       lastDailyCheck = millis();
       serviceDailyMode();
     }
@@ -1162,52 +1191,67 @@ void loop() {
     }
   }
 
-  // --- 4. DATA LOGGING (Every 60s) ---
-  if (timeSet && !fwReceiving && millis() - lastLogUpdate > 60000) {
+  // --- 4. DATA LOGGING (Every 60s; buffered in RAM until the clock is known) ---
+  if (!fwReceiving && millis() - lastLogUpdate > 60000) {
     lastLogUpdate = millis();
-    unsigned long currentEpoch = bootTimestamp + (millis() / 1000);
 
-    // Rolling buffer: the app archives on every connect, so once the file
-    // gets big just start fresh instead of filling LittleFS.
-    // Also check the last byte: a power cut mid-write leaves a partial row
-    // with no newline, and appending onto it would glue two rows together
-    // into a corrupt timestamp.
-    bool needsNewline = false;
-    if (!isStreamingGraph) {
-      File check = LittleFS.open("/history.csv", FILE_READ);
-      if (check) {
-        size_t sz = check.size();
-        if (sz > 0) {
-          check.seek(sz - 1);
-          needsNewline = (check.read() != '\n');
-        }
-        check.close();
-        if (sz > HISTORY_MAX_BYTES) {
-          LittleFS.remove("/history.csv");
-          needsNewline = false;
-          Serial.println("History buffer full — starting a fresh file.");
+    // In DAILY the meaningful "set" value is the hold target, not the
+    // zeroed tow targets
+    int setL = (driveMode == MODE_DAILY) ? dailyTargetPsi : targetLeftPsi;
+    int setR = (driveMode == MODE_DAILY) ? dailyTargetPsi : targetRightPsi;
+
+    if (!timeSet) {
+      // No clock yet — ring-buffer the row, back-stamped at next TIME sync
+      pendingRows[pendingRowHead] = {
+        (uint32_t)millis(),
+        (int16_t)(leftPsi >= 0 ? leftPsi : 0),
+        (int16_t)(rightPsi >= 0 ? rightPsi : 0),
+        (int16_t)(tankPsi >= 0 ? tankPsi : 0),
+        (int16_t)setL, (int16_t)setR
+      };
+      pendingRowHead = (pendingRowHead + 1) % PENDING_ROWS_MAX;
+      if (pendingRowCount < PENDING_ROWS_MAX) pendingRowCount++;
+    } else {
+      unsigned long currentEpoch = bootTimestamp + (millis() / 1000);
+
+      // Rolling buffer: the app archives on every connect, so once the file
+      // gets big just start fresh instead of filling LittleFS.
+      // Also check the last byte: a power cut mid-write leaves a partial row
+      // with no newline, and appending onto it would glue two rows together
+      // into a corrupt timestamp.
+      bool needsNewline = false;
+      if (!isStreamingGraph) {
+        File check = LittleFS.open("/history.csv", FILE_READ);
+        if (check) {
+          size_t sz = check.size();
+          if (sz > 0) {
+            check.seek(sz - 1);
+            needsNewline = (check.read() != '\n');
+          }
+          check.close();
+          if (sz > HISTORY_MAX_BYTES) {
+            LittleFS.remove("/history.csv");
+            needsNewline = false;
+            Serial.println("History buffer full — starting a fresh file.");
+          }
         }
       }
-    }
 
-    File file = LittleFS.open("/history.csv", FILE_APPEND);
-    if (file && needsNewline) file.print("\n");
-    if (file) {
-        // In DAILY the meaningful "set" value is the hold target, not the
-        // zeroed tow targets
-        int setL = (driveMode == MODE_DAILY) ? dailyTargetPsi : targetLeftPsi;
-        int setR = (driveMode == MODE_DAILY) ? dailyTargetPsi : targetRightPsi;
-        char logStr[80];
-        sprintf(logStr, "%lu,%d,%d,%d,%d,%d\n", currentEpoch,
-                leftPsi >= 0 ? leftPsi : 0,
-                rightPsi >= 0 ? rightPsi : 0,
-                tankPsi >= 0 ? tankPsi : 0,
-                setL,
-                setR);
-        file.print(logStr);
-        file.close();
-        Serial.print("Logged: ");
-        Serial.print(logStr);
+      File file = LittleFS.open("/history.csv", FILE_APPEND);
+      if (file && needsNewline) file.print("\n");
+      if (file) {
+          char logStr[80];
+          sprintf(logStr, "%lu,%d,%d,%d,%d,%d\n", currentEpoch,
+                  leftPsi >= 0 ? leftPsi : 0,
+                  rightPsi >= 0 ? rightPsi : 0,
+                  tankPsi >= 0 ? tankPsi : 0,
+                  setL,
+                  setR);
+          file.print(logStr);
+          file.close();
+          Serial.print("Logged: ");
+          Serial.print(logStr);
+      }
     }
   }
 }

@@ -181,6 +181,8 @@ const withTimeout = (promise, ms) => Promise.race([
 ]);
 
 let autoFailStreak = 0;
+let lastSavedDeviceCount = null;   // devices getDevices() returned on the last attempt
+let lastAutoResult = 'not run';    // outcome of the last auto-connect attempt, for diagnostics
 
 function showConnectHint(noSavedDevice) {
   const standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
@@ -196,15 +198,18 @@ function showConnectHint(noSavedDevice) {
 async function autoReconnect() {
   if (!navigator.bluetooth || !navigator.bluetooth.getDevices) {
     console.log('Auto-reconnect not supported in this browser.');
+    lastAutoResult = 'getDevices unsupported';
     return;
   }
   if (isAutoReconnecting || (bleDevice && bleDevice.gatt.connected)) return;
 
   try {
     const devices = await navigator.bluetooth.getDevices();
+    lastSavedDeviceCount = devices.length;
     const esp32 = devices.find(d => d.name && d.name === 'Air Bags');
     if (!esp32) {
       console.log('No previously paired ESP32 found.');
+      lastAutoResult = 'no saved device';
       ui.status.innerText = 'Tap CONNECT to pair';
       showConnectHint(true); // permission not persisting — the auto-connect blocker
       return;
@@ -220,9 +225,11 @@ async function autoReconnect() {
       try {
         await withTimeout(connectToDevice(esp32), 8000);
         isAutoReconnecting = false;
+        lastAutoResult = 'connected';
         return; // onConnected() has taken over the UI
       } catch (err) {
         console.warn(`Auto-connect attempt ${attempt} failed:`, err);
+        lastAutoResult = `connect failed: ${err && err.message ? err.message : err}`;
         try { esp32.gatt.disconnect(); } catch(_) {}
         if (attempt < 2) await new Promise(r => setTimeout(r, 1500));
       }
@@ -305,6 +312,16 @@ function onConnected() {
 }
 
 let syncPhase = null; // 'hist' → 'ev' → null
+let syncPhaseAt = 0;
+
+// A lost END must not wedge the phase machine forever
+setInterval(() => {
+  if (syncPhase && Date.now() - syncPhaseAt > 60000) {
+    console.warn('Sync phase timed out, resetting');
+    syncPhase = null;
+    graphBuffer = "";
+  }
+}, 20000);
 
 async function sendTimeAndRequestSync() {
   if (!graphCharacteristic) return;
@@ -320,6 +337,7 @@ async function sendTimeAndRequestSync() {
       try { since = parseInt(localStorage.getItem('lastDeviceEpoch')) || 0; } catch(_) {}
       if (!since && historyData.length) since = Math.floor(historyData[historyData.length - 1].t / 1000);
       syncPhase = 'hist';
+      syncPhaseAt = Date.now();
       const cmd = supportsIncrementalSync() && since ? "GET:" + Math.max(0, since - 600) : "GET";
       await graphCharacteristic.writeValue(encoder.encode(cmd));
     }, 500); // Give ESP32 a moment to process the time setting
@@ -333,6 +351,7 @@ async function requestEventSync() {
   let since = 0;
   try { since = parseInt(localStorage.getItem('lastEventEpoch')) || 0; } catch(_) {}
   syncPhase = 'ev';
+  syncPhaseAt = Date.now();
   try {
     const encoder = new TextEncoder('utf-8');
     await graphCharacteristic.writeValue(encoder.encode(since ? "GETEV:" + Math.max(0, since - 600) : "GETEV"));
@@ -385,6 +404,10 @@ function onDisconnected() {
   graphCharacteristic = null;
   otaStatusCharacteristic = null;
   modeCharacteristic = null;
+  // A sync interrupted mid-stream must not bleed into the next connect's
+  // streams (history rows were ending up parsed as events)
+  graphBuffer = "";
+  syncPhase = null;
   updateSetButtonsLayout();
   // Make targets modified again so user knows to hit SET
   appliedLeft = -1;
@@ -1127,6 +1150,9 @@ function parseEventRows(str) {
     const t = parseInt(trimmed.substring(0, comma)) * 1000;
     const code = trimmed.substring(comma + 1);
     if (!isFinite(t) || t < HISTORY_T_MIN || t > tMax || !code) continue;
+    // Real event codes start with a letter — a leading digit means a
+    // history row that leaked into the event stream; drop it
+    if (!/^[A-Z]/.test(code)) continue;
     rows.push({ t, code });
   }
   return rows;
@@ -1788,6 +1814,8 @@ function buildDiagnosticsReport() {
   let stats = null;
   try { stats = localStorage.getItem('lastStats'); } catch(_) {}
   lines.push(`Valve counters (lifetime): ${stats || 'not captured yet'}`);
+  const standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+  lines.push(`AutoConnect: api=${!!(navigator.bluetooth && navigator.bluetooth.getDevices)} savedDevices=${lastSavedDeviceCount ?? '?'} standalone=${standalone} failStreak=${autoFailStreak} last="${lastAutoResult}"`);
 
   const wk = Date.now() - 7 * 86400000;
   const ev7 = eventData.filter(e => e.t >= wk);
