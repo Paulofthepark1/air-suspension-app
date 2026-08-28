@@ -21,8 +21,9 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <esp_system.h>
+#include <sys/time.h>
 
-#define FW_VERSION "2.3.2"
+#define FW_VERSION "2.3.3"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -221,11 +222,12 @@ struct PendingEvent { unsigned long ms; char code[48]; };
 PendingEvent pendingEvents[20];
 int pendingEventCount = 0;
 
-// History rows logged before a phone has synced the clock: buffered in a
-// RAM ring (up to 6h) with boot-relative time and back-stamped with real
-// epochs at the next TIME sync — so reboot gaps in the graph self-heal.
+// History rows logged before the clock is known: buffered in a RAM ring
+// (up to 24h) with boot-relative time and back-stamped with real epochs at
+// the next TIME sync. The clock survives software reboots via the RTC, so
+// this ring only matters after a full power cut.
 struct PendingRow { uint32_t ms; int16_t l, r, tk, sl, sr; };
-const int PENDING_ROWS_MAX = 360;
+const int PENDING_ROWS_MAX = 1440;
 PendingRow pendingRows[PENDING_ROWS_MAX];
 int pendingRowCount = 0;
 int pendingRowHead = 0;
@@ -750,6 +752,11 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
          unsigned long currentEpoch = rxValue.substring(5).toInt();
          bootTimestamp = currentEpoch - (millis() / 1000);
          timeSet = true;
+         // Mirror into the system clock: the RTC keeps it ticking through
+         // software reboots (firmware updates, crashes), so the clock is
+         // already synced when we come back up — only a power cut loses it.
+         struct timeval tv = { (time_t)currentEpoch, 0 };
+         settimeofday(&tv, NULL);
          flushPendingEvents(); // boot/reset events get their real epochs now
          Serial.print("Time set! Boot epoch: ");
          Serial.println(bootTimestamp);
@@ -817,7 +824,18 @@ void setup() {
   }
   prefs.end();
 
-  // Recorded with its true epoch once a phone syncs the clock
+  // The RTC keeps time through software resets — if it holds a plausible
+  // value, the clock from before the reboot carries straight over and
+  // logging never skips a beat. Only a power cut clears it.
+  time_t rtcNow = time(NULL);
+  if (rtcNow > 1735689600) { // after Jan 1 2025 = RTC survived the reboot
+    bootTimestamp = (unsigned long)rtcNow - (millis() / 1000);
+    timeSet = true;
+    Serial.print("Clock restored from RTC: ");
+    Serial.println((unsigned long)rtcNow);
+  }
+
+  // Recorded with its true epoch once the clock is known
   logEvent(String("BOOT:") + resetReasonStr() + ":v" FW_VERSION);
 
   BLEDevice::init("Air Bags");

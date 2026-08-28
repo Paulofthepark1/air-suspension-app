@@ -81,8 +81,11 @@ default 4MB partition scheme.
 `/events.csv` records reboots (with `esp_reset_reason` — poweron / crash /
 brownout / watchdog), mode changes, every fill/deflate with duration and
 from→to PSI (daily and tow), capped fill attempts, LOWTANK/LOWBAGS
-warnings, and tank dumps. Events that occur before a phone has synced the
-clock are buffered and written with corrected epochs afterward. The app
+warnings, and tank dumps. From fw 2.3.3 the clock survives software
+reboots (firmware updates, crashes) via the ESP32's RTC, so logging
+continues with real timestamps immediately; only a power cut clears it.
+Events that occur before the clock is known are buffered and written with
+corrected epochs afterward. The app
 syncs events incrementally after the history sync, keeps ~6 weeks, and
 shows them in the **EVENT LOG** modal with a 24h summary; the valve
 counters button queries `STATS`.
@@ -90,7 +93,9 @@ counters button queries `STATS`.
 ## Pressure history
 
 The controller logs one CSV row per minute to LittleFS and streams it over
-the graph characteristic on connect. From fw 2.1.1 the app syncs
+the graph characteristic on connect. Rows logged before the clock is known
+(i.e. after a power cut, before a phone connects) are held in a 24h RAM
+ring and back-stamped when the time syncs. From fw 2.1.1 the app syncs
 incrementally (`GET:<last epoch>`) and keeps ~6 weeks of merged history in
 localStorage as the archive; the on-device file is a rolling buffer wiped
 past ~300KB. The in-app graph is a dependency-free canvas renderer:
