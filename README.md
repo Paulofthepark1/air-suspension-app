@@ -65,14 +65,14 @@ default 4MB partition scheme.
 | Command | Effect |
 |---|---|
 | `SET:<left>:<right>` | Set target PSI and start the control loop; `-` for either side leaves it untouched (per-side set, fw ≥ 2.0.1) |
-| `DUMP:1` / `DUMP:0` | Open/close the tank dump valve |
+| `DUMP:1` / `DUMP:0` | Open/close the tank dump relay (no dump valve is currently plumbed — command kept for future hardware; not exposed in the app) |
 | `WIFI:<ssid>\n<pass>` | Save Wi-Fi credentials to flash (rescue mode only) |
 | `FWBEGIN:<size>:<md5>` / chunks / `FWEND` / `FWABORT` | BLE firmware update |
 | `OTA:1` | Rescue mode: join Wi-Fi, open ArduinoOTA IDE port for 5 min |
 | `MODE:TOW` / `MODE:DAILY` | Switch drive mode (persisted) |
 | `DTGT:<psi>` | Set the DAILY hold target, 5–50 (persisted) |
 | `STATS` | Reply with lifetime valve actuation counters (NVS-persisted) |
-| `DRAIN:1` / `DRAIN:0` | Full air-down: vent both bags (staggered), then dump the tank — sequential so solenoid inrush never stacks; hard time caps; `DRAIN:0` aborts |
+| `DRAIN:1` / `DRAIN:0` | Full air-down: vent both bags, then bleed the tank through one bag circuit (in+out open) alternating sides every 30s — no dump valve exists; staggered switching, ≤2 valves energized, hard time caps; `DRAIN:0` aborts |
 | `GET` / `GET:<epoch>` | (graph char) Stream history CSV; with epoch, only newer rows |
 | `GETEV` / `GETEV:<epoch>` | (graph char) Stream the event log |
 

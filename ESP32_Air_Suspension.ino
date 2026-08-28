@@ -22,7 +22,7 @@
 #include <Update.h>
 #include <esp_system.h>
 
-#define FW_VERSION "2.3.0"
+#define FW_VERSION "2.3.1"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -108,16 +108,22 @@ unsigned long towStartMsL = 0, towStartMsR = 0;
 int towFromPsiL = 0, towFromPsiR = 0;
 
 // ---- FULL AIR-DOWN (DRAIN) ----
-// Sequential so inrush never stacks: both bag vents (staggered 300ms),
-// then the tank dump. Never more than two solenoids energized — the same
-// electrical load as normal dual-side operation. Hard time caps.
+// There is no tank dump valve: the only way out of the tank is THROUGH
+// a bag circuit (in-valve -> bag -> out-valve -> atmosphere). Sequence:
+// vent both bags, then pass-through-bleed the tank one side at a time,
+// alternating sides every 30s so coils cool and wear is shared. Valves
+// switch staggered 300ms so solenoid inrush never stacks; never more
+// than two solenoids energized. Hard time caps.
 enum DrainPhase { DRAIN_OFF = 0, DRAIN_BAGS, DRAIN_TANK };
 DrainPhase drainPhase = DRAIN_OFF;
+bool drainSideRight = false;
 unsigned long drainStartMs = 0;
 unsigned long drainPhaseMs = 0;
+unsigned long drainSwapMs = 0;
 unsigned long lastDrainCheck = 0;
 const unsigned long DRAIN_BAGS_MAX_MS = 120000; // 2 min cap
-const unsigned long DRAIN_TANK_MAX_MS = 300000; // 5 min cap
+const unsigned long DRAIN_TANK_MAX_MS = 600000; // 10 min cap (pass-through is slow)
+const unsigned long DRAIN_SWAP_MS = 30000;      // alternate sides every 30s
 const int DRAIN_DONE_PSI = 2;
 
 // Graph Logging Variables
@@ -270,6 +276,18 @@ void endDrain(const char* reason) {
   drainPhase = DRAIN_OFF;
   logEvent("DRAINEND:" + String((millis() - drainStartMs) / 1000) + "s:" + reason);
   setOtaStatus(String("Drain ") + reason + ".", false);
+}
+
+// Open one side's in+out pair so tank air bleeds through that bag circuit
+void drainOpenSide(bool right) {
+  setValve(right ? RIGHT_AIR_OUT_PIN : LEFT_AIR_OUT_PIN, true);
+  delay(300); // stagger inrush
+  setValve(right ? RIGHT_AIR_IN_PIN : LEFT_AIR_IN_PIN, true);
+}
+
+void drainCloseSide(bool right) {
+  setValve(right ? RIGHT_AIR_IN_PIN : LEFT_AIR_IN_PIN, false);
+  setValve(right ? RIGHT_AIR_OUT_PIN : LEFT_AIR_OUT_PIN, false);
 }
 
 const char* resetReasonStr() {
@@ -979,17 +997,30 @@ void loop() {
         bool bagsEmpty = (leftPsi < 0 || leftPsi <= DRAIN_DONE_PSI) &&
                          (rightPsi < 0 || rightPsi <= DRAIN_DONE_PSI);
         if (bagsEmpty || millis() - drainPhaseMs > DRAIN_BAGS_MAX_MS) {
+          // No dump valve exists — bleed the tank through one bag circuit
           setValve(LEFT_AIR_OUT_PIN, false);
           setValve(RIGHT_AIR_OUT_PIN, false);
+          delay(300);
           drainPhase = DRAIN_TANK;
           drainPhaseMs = millis();
-          setValve(TANK_DUMP_PIN, true);
+          drainSideRight = false;
+          drainSwapMs = millis();
+          drainOpenSide(drainSideRight);
           setOtaStatus("DRAIN:TANK", false);
         }
-      } else { // DRAIN_TANK
+      } else { // DRAIN_TANK: pass-through bleed, alternating sides
         bool tankEmpty = (tankPsi >= 0) && tankPsi <= DRAIN_DONE_PSI;
-        if (tankEmpty) endDrain("complete");
-        else if (millis() - drainPhaseMs > DRAIN_TANK_MAX_MS) endDrain("timed out");
+        if (tankEmpty) {
+          endDrain("complete");
+        } else if (millis() - drainPhaseMs > DRAIN_TANK_MAX_MS) {
+          endDrain("timed out");
+        } else if (millis() - drainSwapMs > DRAIN_SWAP_MS) {
+          drainCloseSide(drainSideRight);
+          delay(300);
+          drainSideRight = !drainSideRight;
+          drainOpenSide(drainSideRight);
+          drainSwapMs = millis();
+        }
       }
     }
 
