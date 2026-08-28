@@ -72,6 +72,7 @@ default 4MB partition scheme.
 | `MODE:TOW` / `MODE:DAILY` | Switch drive mode (persisted) |
 | `DTGT:<psi>` | Set the DAILY hold target, 5–50 (persisted) |
 | `STATS` | Reply with lifetime valve actuation counters (NVS-persisted) |
+| `DRAIN:1` / `DRAIN:0` | Full air-down: vent both bags (staggered), then dump the tank — sequential so solenoid inrush never stacks; hard time caps; `DRAIN:0` aborts |
 | `GET` / `GET:<epoch>` | (graph char) Stream history CSV; with epoch, only newer rows |
 | `GETEV` / `GETEV:<epoch>` | (graph char) Stream the event log |
 
