@@ -567,6 +567,28 @@ body.daily-mode #btn-sync {
   border-radius: 50%;
 }
 
+.logs-list {
+  max-height: 55vh;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+.log-row {
+  padding: 7px 0;
+  border-bottom: 1px solid #2a2a2a;
+  color: #ddd;
+}
+
+.log-time {
+  color: #888;
+  font-size: 0.75rem;
+  margin-right: 8px;
+}
+
+.log-warn {
+  color: #ff5c47;
+}
+
 .graph-hint {
   text-align: center;
   color: #666;

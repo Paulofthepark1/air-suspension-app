@@ -71,7 +71,20 @@ default 4MB partition scheme.
 | `OTA:1` | Rescue mode: join Wi-Fi, open ArduinoOTA IDE port for 5 min |
 | `MODE:TOW` / `MODE:DAILY` | Switch drive mode (persisted) |
 | `DTGT:<psi>` | Set the DAILY hold target, 5–50 (persisted) |
+| `STATS` | Reply with lifetime valve actuation counters (NVS-persisted) |
 | `GET` / `GET:<epoch>` | (graph char) Stream history CSV; with epoch, only newer rows |
+| `GETEV` / `GETEV:<epoch>` | (graph char) Stream the event log |
+
+## Event log (fw ≥ 2.2.0)
+
+`/events.csv` records reboots (with `esp_reset_reason` — poweron / crash /
+brownout / watchdog), mode changes, every fill/deflate with duration and
+from→to PSI (daily and tow), capped fill attempts, LOWTANK/LOWBAGS
+warnings, and tank dumps. Events that occur before a phone has synced the
+clock are buffered and written with corrected epochs afterward. The app
+syncs events incrementally after the history sync, keeps ~6 weeks, and
+shows them in the **EVENT LOG** modal with a 24h summary; the valve
+counters button queries `STATS`.
 
 ## Pressure history
 

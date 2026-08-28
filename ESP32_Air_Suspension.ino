@@ -20,8 +20,9 @@
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <Update.h>
+#include <esp_system.h>
 
-#define FW_VERSION "2.1.2"
+#define FW_VERSION "2.2.0"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -94,8 +95,17 @@ bool dailyFillingL = false, dailyFillingR = false;
 bool dailyDeflatingL = false, dailyDeflatingR = false;
 unsigned long dailyFillStartL = 0, dailyFillStartR = 0;
 unsigned long dailyCooldownL = 0, dailyCooldownR = 0;
+int dailyFillFromL = 0, dailyFillFromR = 0;
+int dailyDeflFromL = 0, dailyDeflFromR = 0;
 unsigned long lastDailyCheck = 0;
 String modeStatusValue = "";
+String lastDailyWarn = "";
+unsigned long dumpStartMs = 0;
+
+// TOW-mode transition tracking (for the event log)
+ControlState prevLeftState = IDLE, prevRightState = IDLE;
+unsigned long towStartMsL = 0, towStartMsR = 0;
+int towFromPsiL = 0, towFromPsiR = 0;
 
 // Graph Logging Variables
 unsigned long bootTimestamp = 0;
@@ -136,12 +146,109 @@ const int TANK_SENSOR_PIN = 6;
 #define CHAR_FW_DATA_UUID      "beb5483e-36e8-4688-b7f5-ea07361b26a8"
 #define CHAR_MODE_UUID         "beb5483e-36e9-4688-b7f5-ea07361b26a8"
 
+// ---- VALVE WRAPPER + LIFETIME ACTUATION COUNTERS ----
+// All solenoid writes go through setValve so every OFF->ON edge is counted.
+// Counters persist in NVS (saved every 10 min when changed, and on STATS).
+uint32_t valveCount[5] = {0, 0, 0, 0, 0}; // Lin, Lout, Rin, Rout, Dump
+bool valveState[5] = {false, false, false, false, false};
+bool valveCountsDirty = false;
+unsigned long lastCounterSave = 0;
+
+int valveIndex(int pin) {
+  if (pin == LEFT_AIR_IN_PIN) return 0;
+  if (pin == LEFT_AIR_OUT_PIN) return 1;
+  if (pin == RIGHT_AIR_IN_PIN) return 2;
+  if (pin == RIGHT_AIR_OUT_PIN) return 3;
+  if (pin == TANK_DUMP_PIN) return 4;
+  return -1;
+}
+
+void setValve(int pin, bool on) {
+  int i = valveIndex(pin);
+  if (i >= 0 && on && !valveState[i]) {
+    valveCount[i]++;
+    valveCountsDirty = true;
+  }
+  if (i >= 0) valveState[i] = on;
+  digitalWrite(pin, on ? RELAY_ON : RELAY_OFF);
+}
+
+void saveValveCounters() {
+  if (!valveCountsDirty) return;
+  prefs.begin("airsus", false);
+  for (int i = 0; i < 5; i++) {
+    char key[4] = {'c', (char)('0' + i), 0, 0};
+    prefs.putUInt(key, valveCount[i]);
+  }
+  prefs.end();
+  valveCountsDirty = false;
+  lastCounterSave = millis();
+}
+
 void stopAllSolenoids() {
-  digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-  digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
-  digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-  digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
-  digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
+  setValve(LEFT_AIR_IN_PIN, false);
+  setValve(LEFT_AIR_OUT_PIN, false);
+  setValve(RIGHT_AIR_IN_PIN, false);
+  setValve(RIGHT_AIR_OUT_PIN, false);
+  setValve(TANK_DUMP_PIN, false);
+}
+
+// ---- EVENT LOG ----
+// /events.csv rows: epoch,CODE[:detail...]. Events before the phone has
+// synced the clock are buffered with boot-relative time and written with
+// corrected epochs once TIME arrives — so reboot reasons are never lost.
+const size_t EVENTS_MAX_BYTES = 100 * 1024;
+struct PendingEvent { unsigned long ms; char code[48]; };
+PendingEvent pendingEvents[20];
+int pendingEventCount = 0;
+
+void writeEventRow(unsigned long epoch, const char* code) {
+  File check = LittleFS.open("/events.csv", FILE_READ);
+  if (check) {
+    size_t sz = check.size();
+    check.close();
+    if (sz > EVENTS_MAX_BYTES) LittleFS.remove("/events.csv");
+  }
+  File f = LittleFS.open("/events.csv", FILE_APPEND);
+  if (f) {
+    f.printf("%lu,%s\n", epoch, code);
+    f.close();
+  }
+}
+
+void logEvent(const String& code) {
+  Serial.println("EVENT: " + code);
+  if (!timeSet) {
+    if (pendingEventCount < 20) {
+      pendingEvents[pendingEventCount].ms = millis();
+      strncpy(pendingEvents[pendingEventCount].code, code.c_str(), 47);
+      pendingEvents[pendingEventCount].code[47] = 0;
+      pendingEventCount++;
+    }
+    return;
+  }
+  writeEventRow(bootTimestamp + millis() / 1000, code.c_str());
+}
+
+void flushPendingEvents() {
+  for (int i = 0; i < pendingEventCount; i++) {
+    writeEventRow(bootTimestamp + pendingEvents[i].ms / 1000, pendingEvents[i].code);
+  }
+  pendingEventCount = 0;
+}
+
+const char* resetReasonStr() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "poweron";
+    case ESP_RST_SW: return "restart";
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_BROWNOUT: return "brownout";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_EXT: return "ext-reset";
+    default: return "other";
+  }
 }
 
 // Persist an OTA status message so it survives the reboot after an
@@ -192,6 +299,7 @@ void setDriveMode(DriveMode m) {
   leftState = IDLE;
   rightState = IDLE;
   resetDailyState();
+  logEvent(m == MODE_DAILY ? "MODE:DAILY" : "MODE:TOW");
   modeStatusValue = ""; // force republish
   if (m == MODE_TOW) {
     publishModeStatus("T");
@@ -208,19 +316,21 @@ void setDriveMode(DriveMode m) {
 void serviceDailySide(int psi, int inPin, int outPin,
                       bool &filling, bool &deflating,
                       unsigned long &fillStart, unsigned long &cooldownUntil,
-                      bool tankOk, bool &wantsButCant) {
+                      bool tankOk, bool &wantsButCant,
+                      int &fillFrom, int &deflFrom, char side) {
   if (psi < 0) { // no sensor reading — keep this side's valves shut
     filling = false;
     deflating = false;
-    digitalWrite(inPin, RELAY_OFF);
-    digitalWrite(outPin, RELAY_OFF);
+    setValve(inPin, false);
+    setValve(outPin, false);
     return;
   }
 
   if (deflating) {
     if (psi <= dailyTargetPsi) {
       deflating = false;
-      digitalWrite(outPin, RELAY_OFF);
+      setValve(outPin, false);
+      logEvent(String("DDEFL") + side + ":" + String(deflFrom) + ">" + String(psi));
     }
     return;
   }
@@ -228,15 +338,17 @@ void serviceDailySide(int psi, int inPin, int outPin,
   if (filling) {
     if (psi >= dailyTargetPsi) {
       filling = false;
-      digitalWrite(inPin, RELAY_OFF);
+      setValve(inPin, false);
+      logEvent(String("DFILL") + side + ":" + String((millis() - fillStart) / 1000) + "s:" + String(fillFrom) + ">" + String(psi));
     } else if (millis() - fillStart > DAILY_FILL_MAX_MS) {
       filling = false;
-      digitalWrite(inPin, RELAY_OFF);
+      setValve(inPin, false);
       cooldownUntil = millis() + DAILY_COOLDOWN_MS;
+      logEvent(String("DFILLCAP") + side + ":" + String(fillFrom) + ">" + String(psi));
       Serial.println("Daily fill attempt capped; cooling down.");
     } else if (!tankOk) {
       filling = false;
-      digitalWrite(inPin, RELAY_OFF);
+      setValve(inPin, false);
       wantsButCant = true;
     }
     return;
@@ -244,16 +356,18 @@ void serviceDailySide(int psi, int inPin, int outPin,
 
   if (psi >= dailyTargetPsi + DAILY_DEFL_HYST) {
     deflating = true;
-    digitalWrite(inPin, RELAY_OFF);
-    digitalWrite(outPin, RELAY_ON);
+    deflFrom = psi;
+    setValve(inPin, false);
+    setValve(outPin, true);
   } else if (psi <= dailyTargetPsi - DAILY_FILL_HYST || psi < DAILY_MIN_PSI) {
     if (!tankOk) {
       wantsButCant = true;
     } else if (millis() >= cooldownUntil) {
       filling = true;
       fillStart = millis();
-      digitalWrite(outPin, RELAY_OFF);
-      digitalWrite(inPin, RELAY_ON);
+      fillFrom = psi;
+      setValve(outPin, false);
+      setValve(inPin, true);
     }
   }
 }
@@ -265,10 +379,10 @@ void serviceDailyMode() {
 
   serviceDailySide(leftPsi, LEFT_AIR_IN_PIN, LEFT_AIR_OUT_PIN,
                    dailyFillingL, dailyDeflatingL, dailyFillStartL, dailyCooldownL,
-                   tankOk, wantsButCant);
+                   tankOk, wantsButCant, dailyFillFromL, dailyDeflFromL, 'L');
   serviceDailySide(rightPsi, RIGHT_AIR_IN_PIN, RIGHT_AIR_OUT_PIN,
                    dailyFillingR, dailyDeflatingR, dailyFillStartR, dailyCooldownR,
-                   tankOk, wantsButCant);
+                   tankOk, wantsButCant, dailyFillFromR, dailyDeflFromR, 'R');
 
   bool bagsCritical = ((leftPsi >= 0 && leftPsi < DAILY_MIN_PSI) ||
                        (rightPsi >= 0 && rightPsi < DAILY_MIN_PSI)) && !tankOk;
@@ -278,6 +392,13 @@ void serviceDailyMode() {
   else if (dailyFillingL || dailyFillingR) st = "FILL";
   else if (dailyDeflatingL || dailyDeflatingR) st = "DEFL";
   else st = "OK";
+
+  // Log warning transitions to the event log
+  if ((st == "LOWTANK" || st == "LOWBAGS") && st != lastDailyWarn) {
+    logEvent("WARN:" + st);
+  }
+  lastDailyWarn = (st == "LOWTANK" || st == "LOWBAGS") ? st : "";
+
   publishModeStatus("D:" + st + ":" + String(dailyTargetPsi));
 }
 
@@ -295,7 +416,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
     };
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
-      digitalWrite(TANK_DUMP_PIN, RELAY_OFF); // never leave the dump latched
+      setValve(TANK_DUMP_PIN, false); // never leave the dump latched
       if (driveMode == MODE_TOW) {
         // Safety stop on disconnect — manual control needs a live phone.
         // DAILY maintenance is autonomous and keeps running.
@@ -379,11 +500,22 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
         Serial.print("Daily target set to ");
         Serial.println(t);
       } else if (rxValue == "DUMP:1") {
-        digitalWrite(TANK_DUMP_PIN, RELAY_ON);
+        dumpStartMs = millis();
+        setValve(TANK_DUMP_PIN, true);
         Serial.println("Dumping tank...");
       } else if (rxValue == "DUMP:0") {
-        digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
+        setValve(TANK_DUMP_PIN, false);
+        if (dumpStartMs > 0) {
+          logEvent("DUMP:" + String((millis() - dumpStartMs) / 1000));
+          dumpStartMs = 0;
+        }
         Serial.println("Stopped dumping tank.");
+      } else if (rxValue == "STATS") {
+        saveValveCounters();
+        String s = "STATS:Lin=" + String(valveCount[0]) + ",Lout=" + String(valveCount[1]) +
+                   ",Rin=" + String(valveCount[2]) + ",Rout=" + String(valveCount[3]) +
+                   ",Dump=" + String(valveCount[4]);
+        setOtaStatus(s, false);
       } else if (rxValue.startsWith("WIFI:")) {
         // Format: WIFI:<ssid>\n<password>  (newline separator — not valid in either field)
         String payload = rxValue.substring(5);
@@ -523,8 +655,18 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
          unsigned long currentEpoch = rxValue.substring(5).toInt();
          bootTimestamp = currentEpoch - (millis() / 1000);
          timeSet = true;
+         flushPendingEvents(); // boot/reset events get their real epochs now
          Serial.print("Time set! Boot epoch: ");
          Serial.println(bootTimestamp);
+      }
+      else if (rxValue.startsWith("GETEV")) {
+         graphSinceEpoch = 0;
+         if (rxValue.startsWith("GETEV:")) {
+           graphSinceEpoch = strtoul(rxValue.c_str() + 6, NULL, 10);
+         }
+         graphPendingLine = "";
+         isStreamingGraph = true;
+         streamingFile = LittleFS.open("/events.csv", FILE_READ);
       }
       else if (rxValue.startsWith("GET")) {
          // "GET" streams everything; "GET:<epoch>" only rows newer than epoch
@@ -549,11 +691,11 @@ void setup() {
   Serial.begin(115200);
 
   // Set pins to OFF state before making them outputs to avoid relay chatter
-  digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-  digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
-  digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-  digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
-  digitalWrite(TANK_DUMP_PIN, RELAY_OFF);
+  setValve(LEFT_AIR_IN_PIN, false);
+  setValve(LEFT_AIR_OUT_PIN, false);
+  setValve(RIGHT_AIR_IN_PIN, false);
+  setValve(RIGHT_AIR_OUT_PIN, false);
+  setValve(TANK_DUMP_PIN, false);
 
   // Initialize Pins
   pinMode(LEFT_AIR_IN_PIN, OUTPUT);
@@ -571,6 +713,17 @@ void setup() {
   }
 
   loadWifiCredentials();
+
+  // Lifetime valve actuation counters
+  prefs.begin("airsus", true);
+  for (int i = 0; i < 5; i++) {
+    char key[4] = {'c', (char)('0' + i), 0, 0};
+    valveCount[i] = prefs.getUInt(key, 0);
+  }
+  prefs.end();
+
+  // Recorded with its true epoch once a phone syncs the clock
+  logEvent(String("BOOT:") + resetReasonStr() + ":v" FW_VERSION);
 
   BLEDevice::init("Air Bags");
   BLEDevice::setMTU(517); // large MTU speeds up BLE firmware transfer
@@ -780,26 +933,26 @@ void loop() {
         if (leftState == FILLING) {
           if (leftPsi >= targetLeftPsi) {
             leftState = IDLE;
-            digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+            setValve(LEFT_AIR_IN_PIN, false);
+            setValve(LEFT_AIR_OUT_PIN, false);
           } else {
-            digitalWrite(LEFT_AIR_IN_PIN, RELAY_ON);
-            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+            setValve(LEFT_AIR_IN_PIN, true);
+            setValve(LEFT_AIR_OUT_PIN, false);
           }
         } else if (leftState == DEFLATING) {
           if (leftPsi <= targetLeftPsi) {
             leftState = IDLE;
-            digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+            setValve(LEFT_AIR_IN_PIN, false);
+            setValve(LEFT_AIR_OUT_PIN, false);
           } else {
-            digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-            digitalWrite(LEFT_AIR_OUT_PIN, RELAY_ON);
+            setValve(LEFT_AIR_IN_PIN, false);
+            setValve(LEFT_AIR_OUT_PIN, true);
           }
         }
       } else {
         // No sensor or target reached - ensure solenoids are off
-        digitalWrite(LEFT_AIR_IN_PIN, RELAY_OFF);
-        digitalWrite(LEFT_AIR_OUT_PIN, RELAY_OFF);
+        setValve(LEFT_AIR_IN_PIN, false);
+        setValve(LEFT_AIR_OUT_PIN, false);
       }
 
       // RIGHT SIDE LOGIC (only if sensor is connected)
@@ -807,28 +960,53 @@ void loop() {
         if (rightState == FILLING) {
           if (rightPsi >= targetRightPsi) {
             rightState = IDLE;
-            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+            setValve(RIGHT_AIR_IN_PIN, false);
+            setValve(RIGHT_AIR_OUT_PIN, false);
           } else {
-            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_ON);
-            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+            setValve(RIGHT_AIR_IN_PIN, true);
+            setValve(RIGHT_AIR_OUT_PIN, false);
           }
         } else if (rightState == DEFLATING) {
           if (rightPsi <= targetRightPsi) {
             rightState = IDLE;
-            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+            setValve(RIGHT_AIR_IN_PIN, false);
+            setValve(RIGHT_AIR_OUT_PIN, false);
           } else {
-            digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-            digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_ON);
+            setValve(RIGHT_AIR_IN_PIN, false);
+            setValve(RIGHT_AIR_OUT_PIN, true);
           }
         }
       } else {
         // No sensor or target reached - ensure solenoids are off
-        digitalWrite(RIGHT_AIR_IN_PIN, RELAY_OFF);
-        digitalWrite(RIGHT_AIR_OUT_PIN, RELAY_OFF);
+        setValve(RIGHT_AIR_IN_PIN, false);
+        setValve(RIGHT_AIR_OUT_PIN, false);
       }
     }
+  }
+
+  // --- 2c. TOW STATE TRANSITION LOGGING ---
+  if (driveMode == MODE_TOW) {
+    if (prevLeftState == IDLE && leftState != IDLE) {
+      towStartMsL = millis();
+      towFromPsiL = leftPsi;
+    } else if (prevLeftState != IDLE && leftState == IDLE) {
+      logEvent(String(prevLeftState == FILLING ? "TFILLL:" : "TDEFLL:") +
+               String((millis() - towStartMsL) / 1000) + "s:" + String(towFromPsiL) + ">" + String(leftPsi));
+    }
+    if (prevRightState == IDLE && rightState != IDLE) {
+      towStartMsR = millis();
+      towFromPsiR = rightPsi;
+    } else if (prevRightState != IDLE && rightState == IDLE) {
+      logEvent(String(prevRightState == FILLING ? "TFILLR:" : "TDEFLR:") +
+               String((millis() - towStartMsR) / 1000) + "s:" + String(towFromPsiR) + ">" + String(rightPsi));
+    }
+  }
+  prevLeftState = leftState;
+  prevRightState = rightState;
+
+  // Persist valve counters at most every 10 min
+  if (valveCountsDirty && millis() - lastCounterSave > 600000) {
+    saveValveCounters();
   }
 
   // Handle disconnect
@@ -909,13 +1087,17 @@ void loop() {
     File file = LittleFS.open("/history.csv", FILE_APPEND);
     if (file && needsNewline) file.print("\n");
     if (file) {
+        // In DAILY the meaningful "set" value is the hold target, not the
+        // zeroed tow targets
+        int setL = (driveMode == MODE_DAILY) ? dailyTargetPsi : targetLeftPsi;
+        int setR = (driveMode == MODE_DAILY) ? dailyTargetPsi : targetRightPsi;
         char logStr[80];
         sprintf(logStr, "%lu,%d,%d,%d,%d,%d\n", currentEpoch,
                 leftPsi >= 0 ? leftPsi : 0,
                 rightPsi >= 0 ? rightPsi : 0,
                 tankPsi >= 0 ? tankPsi : 0,
-                targetLeftPsi,
-                targetRightPsi);
+                setL,
+                setR);
         file.print(logStr);
         file.close();
         Serial.print("Logged: ");
