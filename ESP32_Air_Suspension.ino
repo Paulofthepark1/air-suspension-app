@@ -22,7 +22,7 @@
 #include <Update.h>
 #include <esp_system.h>
 
-#define FW_VERSION "2.2.0"
+#define FW_VERSION "2.3.0"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -106,6 +106,19 @@ unsigned long dumpStartMs = 0;
 ControlState prevLeftState = IDLE, prevRightState = IDLE;
 unsigned long towStartMsL = 0, towStartMsR = 0;
 int towFromPsiL = 0, towFromPsiR = 0;
+
+// ---- FULL AIR-DOWN (DRAIN) ----
+// Sequential so inrush never stacks: both bag vents (staggered 300ms),
+// then the tank dump. Never more than two solenoids energized — the same
+// electrical load as normal dual-side operation. Hard time caps.
+enum DrainPhase { DRAIN_OFF = 0, DRAIN_BAGS, DRAIN_TANK };
+DrainPhase drainPhase = DRAIN_OFF;
+unsigned long drainStartMs = 0;
+unsigned long drainPhaseMs = 0;
+unsigned long lastDrainCheck = 0;
+const unsigned long DRAIN_BAGS_MAX_MS = 120000; // 2 min cap
+const unsigned long DRAIN_TANK_MAX_MS = 300000; // 5 min cap
+const int DRAIN_DONE_PSI = 2;
 
 // Graph Logging Variables
 unsigned long bootTimestamp = 0;
@@ -235,6 +248,28 @@ void flushPendingEvents() {
     writeEventRow(bootTimestamp + pendingEvents[i].ms / 1000, pendingEvents[i].code);
   }
   pendingEventCount = 0;
+}
+
+void startDrain() {
+  commandReceived = false;
+  leftState = IDLE;
+  rightState = IDLE;
+  stopAllSolenoids();
+  resetDailyState();
+  drainPhase = DRAIN_BAGS;
+  drainStartMs = drainPhaseMs = millis();
+  setValve(LEFT_AIR_OUT_PIN, true);
+  delay(300); // stagger so solenoid inrush never stacks
+  setValve(RIGHT_AIR_OUT_PIN, true);
+  logEvent("DRAINSTART");
+  setOtaStatus("DRAIN:BAGS", false);
+}
+
+void endDrain(const char* reason) {
+  stopAllSolenoids();
+  drainPhase = DRAIN_OFF;
+  logEvent("DRAINEND:" + String((millis() - drainStartMs) / 1000) + "s:" + reason);
+  setOtaStatus(String("Drain ") + reason + ".", false);
 }
 
 const char* resetReasonStr() {
@@ -416,6 +451,15 @@ class MyServerCallbacks: public BLEServerCallbacks {
     };
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
+      if (drainPhase != DRAIN_OFF) {
+        // A deliberate, time-capped air-down keeps running through a
+        // dropped connection — don't release its valves here.
+        if (fwReceiving) {
+          fwReceiving = false;
+          Update.abort();
+        }
+        return;
+      }
       setValve(TANK_DUMP_PIN, false); // never leave the dump latched
       if (driveMode == MODE_TOW) {
         // Safety stop on disconnect — manual control needs a live phone.
@@ -442,6 +486,10 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
       // Expected format: SET:80:85  (Left:Right); "-" leaves that side
       // untouched (per-side set), e.g. SET:80:- or SET:-:85
       if (rxValue.startsWith("SET:")) {
+        if (drainPhase != DRAIN_OFF) {
+          setOtaStatus("Air-down in progress — stop it first.", false);
+          return;
+        }
         if (driveMode == MODE_DAILY) {
           setOtaStatus("In Daily mode — switch to Tow for manual control.", false);
           return;
@@ -510,6 +558,10 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
           dumpStartMs = 0;
         }
         Serial.println("Stopped dumping tank.");
+      } else if (rxValue == "DRAIN:1") {
+        if (drainPhase == DRAIN_OFF) startDrain();
+      } else if (rxValue == "DRAIN:0") {
+        if (drainPhase != DRAIN_OFF) endDrain("stopped");
       } else if (rxValue == "STATS") {
         saveValveCounters();
         String s = "STATS:Lin=" + String(valveCount[0]) + ",Lout=" + String(valveCount[1]) +
@@ -546,6 +598,7 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
           return;
         }
         commandReceived = false;
+        drainPhase = DRAIN_OFF; // valves shut just below
         stopAllSolenoids();
         leftState = IDLE;
         rightState = IDLE;
@@ -600,6 +653,7 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
         otaUpdateStarted = false;
         otaStartTime = millis();
         commandReceived = false;
+        drainPhase = DRAIN_OFF;
         stopAllSolenoids();
 
         // Connect to WiFi
@@ -918,8 +972,29 @@ void loop() {
       if (deviceConnected) pCharTank->notify();
     }
 
+    // --- 2pre. FULL AIR-DOWN SEQUENCE (bags, then tank) ---
+    if (drainPhase != DRAIN_OFF && millis() - lastDrainCheck > 1000) {
+      lastDrainCheck = millis();
+      if (drainPhase == DRAIN_BAGS) {
+        bool bagsEmpty = (leftPsi < 0 || leftPsi <= DRAIN_DONE_PSI) &&
+                         (rightPsi < 0 || rightPsi <= DRAIN_DONE_PSI);
+        if (bagsEmpty || millis() - drainPhaseMs > DRAIN_BAGS_MAX_MS) {
+          setValve(LEFT_AIR_OUT_PIN, false);
+          setValve(RIGHT_AIR_OUT_PIN, false);
+          drainPhase = DRAIN_TANK;
+          drainPhaseMs = millis();
+          setValve(TANK_DUMP_PIN, true);
+          setOtaStatus("DRAIN:TANK", false);
+        }
+      } else { // DRAIN_TANK
+        bool tankEmpty = (tankPsi >= 0) && tankPsi <= DRAIN_DONE_PSI;
+        if (tankEmpty) endDrain("complete");
+        else if (millis() - drainPhaseMs > DRAIN_TANK_MAX_MS) endDrain("timed out");
+      }
+    }
+
     // --- 2a. DAILY MODE MAINTENANCE (1s cadence, phone optional) ---
-    if (driveMode == MODE_DAILY && millis() - lastDailyCheck > 1000) {
+    if (driveMode == MODE_DAILY && drainPhase == DRAIN_OFF && millis() - lastDailyCheck > 1000) {
       lastDailyCheck = millis();
       serviceDailyMode();
     }

@@ -75,6 +75,7 @@ const ui = {
   wifiSsidInput: document.getElementById('wifi-ssid'),
   wifiPassInput: document.getElementById('wifi-pass'),
   btnRescue: document.getElementById('btn-rescue'),
+  btnDrain: document.getElementById('btn-drain'),
   btnMode: document.getElementById('btn-mode'),
   modeBanner: document.getElementById('mode-banner'),
   dailyPanel: document.getElementById('daily-panel'),
@@ -291,6 +292,8 @@ function onConnected() {
   ui.btnOta.style.display = 'inline-block';
   ui.btnWifi.style.display = 'inline-block';
   ui.btnMode.style.display = modeCharacteristic ? 'inline-block' : 'none';
+  ui.btnDrain.style.display = supportsDrain() ? 'inline-block' : 'none';
+  setDrainActive(false);
   ui.connectHint.style.display = 'none';
   autoFailStreak = 0;
   updateInProgress = false;
@@ -348,6 +351,10 @@ function supportsEvents() {
   return !!deviceFwVersion && !isNewerVersion('2.2.0', deviceFwVersion);
 }
 
+function supportsDrain() {
+  return !!deviceFwVersion && !isNewerVersion('2.3.0', deviceFwVersion);
+}
+
 function onDisconnected() {
   document.body.classList.add('disconnected');
   if (updateInProgress) {
@@ -369,6 +376,7 @@ function onDisconnected() {
   ui.btnOta.style.display = 'none';
   ui.btnWifi.style.display = 'none';
   ui.btnMode.style.display = 'none';
+  ui.btnDrain.style.display = 'none';
   ui.modeBanner.style.display = 'none';
   ui.dailyPanel.style.display = 'none';
   document.body.classList.remove('daily-mode');
@@ -588,6 +596,30 @@ const stopDump = async (e) => {
   }
 };
 
+// -- FULL AIR-DOWN (bags, then tank — sequential on the controller) --
+let drainActive = false;
+
+function setDrainActive(active) {
+  drainActive = active;
+  ui.btnDrain.innerText = active ? 'STOP AIR DOWN' : 'AIR DOWN ALL (BAGS + TANK)';
+  ui.btnDrain.style.background = active ? '#ff3b30' : '#4a1512';
+}
+
+ui.btnDrain.addEventListener('click', async () => {
+  if (!cmdCharacteristic) return;
+  const encoder = new TextEncoder('utf-8');
+  try {
+    if (drainActive) {
+      await cmdCharacteristic.writeValue(encoder.encode("DRAIN:0"));
+      return;
+    }
+    if (!confirm("Air down EVERYTHING? The controller vents both bags to 0, then dumps the tank — one step at a time (never more than two valves open). Takes a few minutes; tap STOP anytime.")) return;
+    await cmdCharacteristic.writeValue(encoder.encode("DRAIN:1"));
+  } catch(e) {
+    console.error("Drain error", e);
+  }
+});
+
 ui.btnDump.addEventListener('mousedown', startDump);
 ui.btnDump.addEventListener('touchstart', startDump, {passive: false});
 ui.btnDump.addEventListener('mouseup', stopDump);
@@ -654,6 +686,21 @@ function handleOtaStatusNotify(event) {
   if (msg.trim() === "") return;
   // Let an active transfer consume its protocol messages first
   if (fwTransfer && fwTransfer.onMessage(msg)) return;
+  if (msg === "DRAIN:BAGS") {
+    setDrainActive(true);
+    ui.status.innerText = 'Airing down bags...';
+    return;
+  }
+  if (msg === "DRAIN:TANK") {
+    setDrainActive(true);
+    ui.status.innerText = 'Bags empty — dumping tank...';
+    return;
+  }
+  if (msg.startsWith("Drain ")) {
+    setDrainActive(false);
+    ui.status.innerText = msg;
+    return;
+  }
   if (msg.startsWith("STATS:")) {
     try { localStorage.setItem('lastStats', msg.substring(6)); } catch(_) {}
     if (statsForReport) {
@@ -1165,6 +1212,10 @@ function humanizeEvent(code) {
       return { text: `Tow release ${side(p[0])}: ${p[1] || ''} ${p[2] || ''} PSI` };
     case p[0] === 'DUMP':
       return { text: `Tank dumped for ${p[1]}s` };
+    case p[0] === 'DRAINSTART':
+      return { text: 'Full air-down started' };
+    case p[0] === 'DRAINEND':
+      return { text: `Full air-down ${p[2] || 'ended'} (${p[1] || ''})` };
     default:
       return { text: code };
   }
@@ -1661,6 +1712,7 @@ function initGraph() {
   });
 
   // Legend chips toggle series visibility
+  graph.chipEls = {};
   const legend = document.getElementById('graph-legend');
   for (const s of GRAPH_SERIES) {
     const chip = document.createElement('button');
@@ -1672,6 +1724,7 @@ function initGraph() {
       graphScheduleDraw();
     });
     legend.appendChild(chip);
+    graph.chipEls[s.key] = chip;
   }
 
   // Valve-event marker toggle (▲ fill / ▼ release, colored by side)
@@ -1684,15 +1737,26 @@ function initGraph() {
     graphScheduleDraw();
   });
   legend.appendChild(evChip);
+  graph.chipEls.ev = evChip;
 
   window.addEventListener('resize', () => {
     if (ui.graphModal.style.display === "block") graphScheduleDraw();
   });
 }
 
-ui.btnGraph.addEventListener('click', () => {
+// onlyKeys: array of series keys (+ 'ev') to show, or null for everything
+function openGraph(onlyKeys) {
   initGraph();
   loadHistory();
+  loadEvents();
+  const allKeys = GRAPH_SERIES.map(s => s.key).concat('ev');
+  graph.hidden = {};
+  if (onlyKeys) {
+    for (const k of allKeys) graph.hidden[k] = !onlyKeys.includes(k);
+  }
+  for (const k of allKeys) {
+    if (graph.chipEls[k]) graph.chipEls[k].classList.toggle('off', !!graph.hidden[k]);
+  }
   ui.graphModal.style.display = "block";
   graph.cursorT = null;
   const ext = graphExtent();
@@ -1704,6 +1768,14 @@ ui.btnGraph.addEventListener('click', () => {
     document.querySelector('#graph-ranges .range-btn[data-range="all"]').classList.add('active');
     graphSetRange('all');
   }
+}
+
+ui.btnGraph.addEventListener('click', () => openGraph(null));
+
+// Tapping the tank card opens a tank-only graph
+document.querySelector('.tank-container').addEventListener('click', () => {
+  if (document.body.classList.contains('disconnected')) return;
+  openGraph(['tk']);
 });
 
 ui.btnCloseGraph.addEventListener('click', () => {

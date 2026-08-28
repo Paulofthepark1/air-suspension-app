@@ -253,8 +253,13 @@ body.disconnected .daily-panel,
 body.disconnected #mode-banner,
 body.disconnected #btn-sync,
 body.disconnected #btn-mode,
-body.disconnected #btn-dump {
+body.disconnected #btn-dump,
+body.disconnected #btn-drain {
   display: none !important;
+}
+
+.tank-container {
+  cursor: pointer;
 }
 
 body.disconnected .connect-container {
