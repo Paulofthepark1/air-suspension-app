@@ -66,7 +66,6 @@ const ui = {
   btnCloseLogs: document.getElementById('btn-close-logs'),
   btnStats: document.getElementById('btn-stats'),
   connectHint: document.getElementById('connect-hint'),
-  btnDump: document.getElementById('btn-dump'),
   fwInfo: document.getElementById('fw-info'),
   btnWifi: document.getElementById('btn-wifi'),
   wifiModal: document.getElementById('wifi-modal'),
@@ -352,7 +351,9 @@ function supportsEvents() {
 }
 
 function supportsDrain() {
-  return !!deviceFwVersion && !isNewerVersion('2.3.0', deviceFwVersion);
+  // 2.3.0's drain assumed a tank dump valve that doesn't exist; the
+  // pass-through drain needs 2.3.1
+  return !!deviceFwVersion && !isNewerVersion('2.3.1', deviceFwVersion);
 }
 
 function onDisconnected() {
@@ -571,32 +572,10 @@ ui.btnSetRight.addEventListener('click', async () => {
   }
 });
 
-// -- EMPTY AIR TANK LOGIC --
-const startDump = async (e) => {
-  e.preventDefault();
-  if (!cmdCharacteristic) return;
-  try {
-    const encoder = new TextEncoder('utf-8');
-    await cmdCharacteristic.writeValue(encoder.encode("DUMP:1"));
-    ui.btnDump.style.backgroundColor = "#d32f2f";
-  } catch (err) {
-    console.error("Dump error", err);
-  }
-};
-
-const stopDump = async (e) => {
-  e.preventDefault();
-  if (!cmdCharacteristic) return;
-  try {
-    const encoder = new TextEncoder('utf-8');
-    await cmdCharacteristic.writeValue(encoder.encode("DUMP:0"));
-    ui.btnDump.style.backgroundColor = "#ff3b30";
-  } catch (err) {
-    console.error("Stop Dump error", err);
-  }
-};
-
-// -- FULL AIR-DOWN (bags, then tank — sequential on the controller) --
+// -- FULL AIR-DOWN --
+// No tank dump valve exists: the controller vents the bags, then bleeds
+// the tank through one bag circuit at a time (in+out open), alternating
+// sides every 30s. Never more than two valves energized.
 let drainActive = false;
 
 function setDrainActive(active) {
@@ -613,18 +592,12 @@ ui.btnDrain.addEventListener('click', async () => {
       await cmdCharacteristic.writeValue(encoder.encode("DRAIN:0"));
       return;
     }
-    if (!confirm("Air down EVERYTHING? The controller vents both bags to 0, then dumps the tank — one step at a time (never more than two valves open). Takes a few minutes; tap STOP anytime.")) return;
+    if (!confirm("Air down EVERYTHING? Vents both bags to 0, then bleeds the tank out through the bag valves one side at a time (there's no dump valve on the tank). Never more than two valves open at once. Takes several minutes; tap STOP anytime.")) return;
     await cmdCharacteristic.writeValue(encoder.encode("DRAIN:1"));
   } catch(e) {
     console.error("Drain error", e);
   }
 });
-
-ui.btnDump.addEventListener('mousedown', startDump);
-ui.btnDump.addEventListener('touchstart', startDump, {passive: false});
-ui.btnDump.addEventListener('mouseup', stopDump);
-ui.btnDump.addEventListener('touchend', stopDump);
-ui.btnDump.addEventListener('mouseleave', stopDump);
 
 // -- FIRMWARE UPDATE LOGIC --
 
