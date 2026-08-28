@@ -22,6 +22,7 @@
         <button id="btn-mode" class="sync-btn" style="display: none; margin-left: 8px;">MODE: TOW</button>
       </div>
       <div id="mode-banner" class="mode-banner" style="display: none;"></div>
+      <div id="connect-hint" class="fw-info" style="display: none;"></div>
     </div>
 
     <div class="controls-container">
@@ -97,9 +98,21 @@
     <div class="connect-container">
       <button class="connect-btn" id="btn-connect">CONNECT</button>
       <button class="connect-btn" id="btn-graph" style="margin-top: 10px; background-color: #3f51b5; display: none;">VIEW GRAPH</button>
+      <button class="connect-btn" id="btn-logs" style="margin-top: 10px; background-color: #00796b; display: none; color: white;">EVENT LOG</button>
       <button class="connect-btn" id="btn-ota" style="margin-top: 10px; background-color: #ff9800; display: none; color: white;">UPDATE FIRMWARE</button>
       <button class="connect-btn" id="btn-wifi" style="margin-top: 10px; background-color: #555; display: none; color: white;">WI-FI SETUP</button>
       <button class="start-btn" id="btn-dump" style="margin-top: 15px; background-color: #ff3b30; width: 100%; font-size: 20px; touch-action: manipulation;">EMPTY AIR TANK</button>
+    </div>
+
+    <!-- EVENT LOG MODAL -->
+    <div id="logs-modal" class="modal">
+      <div class="modal-content dark">
+        <span class="close-btn" id="btn-close-logs">&times;</span>
+        <h2 style="margin-top: 0;">Event Log</h2>
+        <div id="logs-summary" class="wifi-hint"></div>
+        <button class="connect-btn" id="btn-stats" style="width: 100%; margin-bottom: 12px;">VALVE LIFETIME COUNTERS</button>
+        <div id="logs-list" class="logs-list"></div>
+      </div>
     </div>
 
     <!-- WI-FI SETUP MODAL -->

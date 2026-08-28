@@ -61,6 +61,11 @@ const ui = {
   btnOta: document.getElementById('btn-ota'),
   graphModal: document.getElementById('graph-modal'),
   btnCloseGraph: document.getElementById('btn-close-graph'),
+  btnLogs: document.getElementById('btn-logs'),
+  logsModal: document.getElementById('logs-modal'),
+  btnCloseLogs: document.getElementById('btn-close-logs'),
+  btnStats: document.getElementById('btn-stats'),
+  connectHint: document.getElementById('connect-hint'),
   btnDump: document.getElementById('btn-dump'),
   fwInfo: document.getElementById('fw-info'),
   btnWifi: document.getElementById('btn-wifi'),
@@ -175,6 +180,19 @@ const withTimeout = (promise, ms) => Promise.race([
   new Promise((_, reject) => setTimeout(() => reject(new Error('timed out')), ms))
 ]);
 
+let autoFailStreak = 0;
+
+function showConnectHint(noSavedDevice) {
+  const standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+  if (standalone) return;
+  if (noSavedDevice || autoFailStreak >= 2) {
+    ui.connectHint.innerText = noSavedDevice
+      ? "Chrome isn't remembering the pairing. Chrome menu → Add to Home screen makes it permanent."
+      : "Tip: installing via Chrome menu → Add to Home screen makes auto-connect more reliable.";
+    ui.connectHint.style.display = 'block';
+  }
+}
+
 async function autoReconnect() {
   if (!navigator.bluetooth || !navigator.bluetooth.getDevices) {
     console.log('Auto-reconnect not supported in this browser.');
@@ -188,6 +206,7 @@ async function autoReconnect() {
     if (!esp32) {
       console.log('No previously paired ESP32 found.');
       ui.status.innerText = 'Tap CONNECT to pair';
+      showConnectHint(true); // permission not persisting — the auto-connect blocker
       return;
     }
 
@@ -213,6 +232,8 @@ async function autoReconnect() {
   }
   isAutoReconnecting = false;
   // The retry timer below keeps searching — walking into range is enough
+  autoFailStreak++;
+  showConnectHint(false);
   ui.status.innerText = 'Searching for Air Bags...';
   ui.btnConnect.innerText = 'CONNECT';
   ui.btnConnect.classList.remove('reconnecting');
@@ -266,9 +287,12 @@ function onConnected() {
   ui.btnSetLeft.classList.remove('disabled');
   ui.btnSetRight.classList.remove('disabled');
   ui.btnGraph.style.display = 'inline-block';
+  ui.btnLogs.style.display = supportsEvents() ? 'inline-block' : 'none';
   ui.btnOta.style.display = 'inline-block';
   ui.btnWifi.style.display = 'inline-block';
   ui.btnMode.style.display = modeCharacteristic ? 'inline-block' : 'none';
+  ui.connectHint.style.display = 'none';
+  autoFailStreak = 0;
   updateInProgress = false;
 
   applyModeUI();
@@ -278,6 +302,8 @@ function onConnected() {
   sendTimeAndRequestSync();
 }
 
+let syncPhase = null; // 'hist' → 'ev' → null
+
 async function sendTimeAndRequestSync() {
   if (!graphCharacteristic) return;
   const currentEpoch = Math.floor(Date.now() / 1000);
@@ -285,10 +311,14 @@ async function sendTimeAndRequestSync() {
   try {
     await graphCharacteristic.writeValue(encoder.encode("TIME:" + currentEpoch));
     setTimeout(async () => {
-      // fw >= 2.1.1 supports incremental sync — only rows we don't have yet
-      const cmd = supportsIncrementalSync() && historyData.length
-        ? "GET:" + Math.floor(historyData[historyData.length - 1].t / 1000)
-        : "GET";
+      // Incremental sync from the newest DEVICE-sourced row (not live app
+      // rows — those would make us skip the device's own log), with a 10
+      // minute overlap margin; duplicates dedupe by timestamp.
+      let since = 0;
+      try { since = parseInt(localStorage.getItem('lastDeviceEpoch')) || 0; } catch(_) {}
+      if (!since && historyData.length) since = Math.floor(historyData[historyData.length - 1].t / 1000);
+      syncPhase = 'hist';
+      const cmd = supportsIncrementalSync() && since ? "GET:" + Math.max(0, since - 600) : "GET";
       await graphCharacteristic.writeValue(encoder.encode(cmd));
     }, 500); // Give ESP32 a moment to process the time setting
   } catch(e) {
@@ -296,8 +326,26 @@ async function sendTimeAndRequestSync() {
   }
 }
 
+async function requestEventSync() {
+  if (!graphCharacteristic || !supportsEvents()) { syncPhase = null; return; }
+  let since = 0;
+  try { since = parseInt(localStorage.getItem('lastEventEpoch')) || 0; } catch(_) {}
+  syncPhase = 'ev';
+  try {
+    const encoder = new TextEncoder('utf-8');
+    await graphCharacteristic.writeValue(encoder.encode(since ? "GETEV:" + Math.max(0, since - 600) : "GETEV"));
+  } catch(e) {
+    console.error("Event sync failed", e);
+    syncPhase = null;
+  }
+}
+
 function supportsIncrementalSync() {
   return !!deviceFwVersion && !isNewerVersion('2.1.1', deviceFwVersion);
+}
+
+function supportsEvents() {
+  return !!deviceFwVersion && !isNewerVersion('2.2.0', deviceFwVersion);
 }
 
 function onDisconnected() {
@@ -317,6 +365,7 @@ function onDisconnected() {
   ui.btnSetLeft.classList.add('disabled');
   ui.btnSetRight.classList.add('disabled');
   ui.btnGraph.style.display = 'none';
+  ui.btnLogs.style.display = 'none';
   ui.btnOta.style.display = 'none';
   ui.btnWifi.style.display = 'none';
   ui.btnMode.style.display = 'none';
@@ -605,6 +654,13 @@ function handleOtaStatusNotify(event) {
   if (msg.trim() === "") return;
   // Let an active transfer consume its protocol messages first
   if (fwTransfer && fwTransfer.onMessage(msg)) return;
+  if (msg.startsWith("STATS:")) {
+    const pairs = msg.substring(6).split(',').map(kv => kv.split('='));
+    const names = { Lin: 'Left fill', Lout: 'Left release', Rin: 'Right fill', Rout: 'Right release', Dump: 'Tank dump' };
+    alert("Lifetime valve actuations:\n" +
+      pairs.map(([k, v]) => `${names[k] || k}: ${v}`).join('\n'));
+    return;
+  }
   ui.status.innerText = msg;
   if (msg.startsWith("Update failed") || msg.startsWith("FWERR:")) updateInProgress = false;
 }
@@ -944,8 +1000,16 @@ function handleGraphData(event) {
   let chunk = decoder.decode(event.target.value);
 
   if (chunk === "END") {
-    console.log("Graph sync complete");
-    parseAndSaveGraphData(graphBuffer);
+    if (syncPhase === 'ev') {
+      console.log("Event sync complete");
+      parseAndSaveEvents(graphBuffer);
+      syncPhase = null;
+    } else {
+      console.log("Graph sync complete");
+      parseAndSaveGraphData(graphBuffer);
+      if (syncPhase === 'hist') requestEventSync();
+      else syncPhase = null;
+    }
     graphBuffer = ""; // reset
   } else {
     graphBuffer += chunk;
@@ -955,6 +1019,13 @@ function handleGraphData(event) {
 function parseAndSaveGraphData(csvStr) {
   const incoming = parseCsvRows(csvStr);
   if (!incoming.length) return;
+
+  // Remember the newest device-sourced timestamp for the next incremental sync
+  const maxIncoming = Math.floor(Math.max(...incoming.map(p => p.t)) / 1000);
+  try {
+    const prev = parseInt(localStorage.getItem('lastDeviceEpoch')) || 0;
+    if (maxIncoming > prev) localStorage.setItem('lastDeviceEpoch', String(maxIncoming));
+  } catch(_) {}
 
   const byTime = new Map(historyData.map(p => [p.t, p]));
   incoming.forEach(p => byTime.set(p.t, p));
@@ -995,7 +1066,11 @@ setInterval(() => {
 
   const t = Date.now();
   const prevLast = historyData.length ? historyData[historyData.length - 1].t : 0;
-  historyData.push({ t, l: liveL, r: liveR, tk: liveTk, sl: null, sr: null });
+  // Live rows carry the meaningful "set" values too: the daily hold target,
+  // or the applied tow targets once SET has been pressed
+  const liveSl = (modeInfo && modeInfo.daily) ? modeInfo.target : (appliedLeft >= 0 ? appliedLeft : null);
+  const liveSr = (modeInfo && modeInfo.daily) ? modeInfo.target : (appliedRight >= 0 ? appliedRight : null);
+  historyData.push({ t, l: liveL, r: liveR, tk: liveTk, sl: liveSl, sr: liveSr });
 
   // Persist occasionally — a lost tail is re-covered by the next device sync
   if (t - lastHistorySave > 300000) saveHistory();
@@ -1010,6 +1085,111 @@ setInterval(() => {
     graphScheduleDraw();
   }
 }, 30000);
+
+// -- EVENT LOG --
+// Rows: epochSec,CODE[:detail...] — reboots (with reason), mode changes,
+// fills/deflates with durations, warnings, dumps. Same merge/prune model
+// as the pressure history.
+let eventData = []; // [{t(ms), code}] sorted by t
+
+function parseEventRows(str) {
+  const rows = [];
+  const tMax = Date.now() + 48 * 3600 * 1000;
+  for (const line of (str || "").split('\n')) {
+    const trimmed = line.trim();
+    const comma = trimmed.indexOf(',');
+    if (comma < 1) continue;
+    const t = parseInt(trimmed.substring(0, comma)) * 1000;
+    const code = trimmed.substring(comma + 1);
+    if (!isFinite(t) || t < HISTORY_T_MIN || t > tMax || !code) continue;
+    rows.push({ t, code });
+  }
+  return rows;
+}
+
+function loadEvents() {
+  try {
+    eventData = parseEventRows(localStorage.getItem('eventLog'));
+    eventData.sort((a, b) => a.t - b.t);
+  } catch(e) {
+    eventData = [];
+  }
+}
+loadEvents();
+
+function parseAndSaveEvents(csvStr) {
+  const incoming = parseEventRows(csvStr);
+  if (!incoming.length) return;
+
+  const byKey = new Map(eventData.map(e => [e.t + '|' + e.code, e]));
+  incoming.forEach(e => byKey.set(e.t + '|' + e.code, e));
+  eventData = [...byKey.values()].sort((a, b) => a.t - b.t);
+
+  const cutoff = Date.now() - HISTORY_KEEP_MS;
+  eventData = eventData.filter(e => e.t >= cutoff);
+
+  try {
+    localStorage.setItem('eventLog', eventData.map(e => `${Math.floor(e.t / 1000)},${e.code}`).join('\n'));
+    localStorage.setItem('lastEventEpoch', String(eventData.length ? Math.floor(eventData[eventData.length - 1].t / 1000) : 0));
+  } catch(e) {
+    console.warn("Could not persist event log", e);
+  }
+}
+
+const RESET_WARN = { crash: true, brownout: true, watchdog: true };
+
+function humanizeEvent(code) {
+  const p = code.split(':');
+  const side = (k) => k.endsWith('L') ? 'left' : 'right';
+  switch (true) {
+    case p[0] === 'BOOT':
+      return { text: `Rebooted (${p[1] || 'unknown'})${p[2] ? ' → ' + p[2] : ''}`, warn: !!RESET_WARN[p[1]] };
+    case p[0] === 'MODE':
+      return { text: `Mode switched to ${p[1]}` };
+    case p[0] === 'WARN':
+      return { text: p[1] === 'LOWBAGS' ? 'BAGS LOW and tank can\'t fill them' : 'Tank too low to top up bags', warn: true };
+    case p[0].startsWith('DFILLCAP'):
+      return { text: `Daily fill ${side(p[0])} hit the 30s cap (${p[1]} PSI) — possible leak or low tank`, warn: true };
+    case p[0].startsWith('DFILL'):
+      return { text: `Daily fill ${side(p[0])}: ${p[1] || ''} ${p[2] || ''} PSI` };
+    case p[0].startsWith('DDEFL'):
+      return { text: `Daily release ${side(p[0])}: ${p[1] || ''} PSI` };
+    case p[0].startsWith('TFILL'):
+      return { text: `Tow fill ${side(p[0])}: ${p[1] || ''} ${p[2] || ''} PSI` };
+    case p[0].startsWith('TDEFL'):
+      return { text: `Tow release ${side(p[0])}: ${p[1] || ''} ${p[2] || ''} PSI` };
+    case p[0] === 'DUMP':
+      return { text: `Tank dumped for ${p[1]}s` };
+    default:
+      return { text: code };
+  }
+}
+
+function renderEventLog() {
+  const list = document.getElementById('logs-list');
+  const summary = document.getElementById('logs-summary');
+  if (!eventData.length) {
+    summary.innerText = 'No events yet — they sync from the controller on each connect.';
+    list.innerHTML = '';
+    return;
+  }
+
+  const dayAgo = Date.now() - 86400000;
+  let fills = 0, reboots = 0, warns = 0;
+  for (const e of eventData) {
+    if (e.t < dayAgo) continue;
+    if (e.code.startsWith('DFILL') || e.code.startsWith('TFILL')) fills++;
+    if (e.code.startsWith('BOOT')) reboots++;
+    if (e.code.startsWith('WARN') || e.code.startsWith('DFILLCAP')) warns++;
+  }
+  summary.innerText = `Last 24h: ${fills} fills · ${reboots} reboots · ${warns} warnings`;
+
+  const rows = eventData.slice(-300).reverse();
+  list.innerHTML = rows.map(e => {
+    const h = humanizeEvent(e.code);
+    return `<div class="log-row${h.warn ? ' log-warn' : ''}"><span class="log-time">${fmtTipTime(e.t)}</span>${h.text}</div>`;
+  }).join('');
+}
 
 // -- GRAPH RENDERER --
 // Custom canvas chart: drag to pan, pinch/scroll to zoom (time axis),
@@ -1227,6 +1407,8 @@ function drawGraph() {
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.setLineDash(s.dash);
+    // Offset Set R's dashes so two coincident set-lines are both visible
+    ctx.lineDashOffset = s.key === 'sr' ? 5 : 0;
     ctx.beginPath();
     let pen = false, lastT = 0, lastPt = null;
     for (const p of drawPts) {
@@ -1444,11 +1626,34 @@ ui.btnCloseGraph.addEventListener('click', () => {
    ui.graphModal.style.display = "none";
 });
 
+// -- EVENT LOG UI --
+ui.btnLogs.addEventListener('click', () => {
+  loadEvents();
+  renderEventLog();
+  ui.logsModal.style.display = "block";
+});
+
+ui.btnCloseLogs.addEventListener('click', () => {
+  ui.logsModal.style.display = "none";
+});
+
+ui.btnStats.addEventListener('click', async () => {
+  if (!cmdCharacteristic) return;
+  try {
+    await cmdCharacteristic.writeValue(new TextEncoder('utf-8').encode("STATS"));
+  } catch(e) {
+    console.error("Stats request failed", e);
+  }
+});
+
 window.addEventListener('click', (event) => {
   if (event.target == ui.graphModal) {
     ui.graphModal.style.display = "none";
   }
   if (event.target == ui.wifiModal) {
     ui.wifiModal.style.display = "none";
+  }
+  if (event.target == ui.logsModal) {
+    ui.logsModal.style.display = "none";
   }
 });
