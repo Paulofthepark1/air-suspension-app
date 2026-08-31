@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.3.4"
+#define FW_VERSION "2.3.5"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -91,6 +91,12 @@ const int DAILY_DEFL_HYST = 3;                  // deflate when psi >= target + 
 const int TANK_FILL_MARGIN = 3;                 // tank must exceed target by this for air to flow
 const unsigned long DAILY_FILL_MAX_MS = 30000;  // cap a fill attempt — a burst line can't drain the tank
 const unsigned long DAILY_COOLDOWN_MS = 45000;  // wait between capped attempts
+// Road bumps spike bag pressure for well under a second; acting on a single
+// out-of-band reading makes the valves hunt the whole drive. A condition
+// must persist before a valve opens, and after any valve closes the lines
+// get time to settle before the next decision.
+const unsigned long DAILY_SUSTAIN_MS = 5000;    // out-of-band must persist this long
+const unsigned long DAILY_SETTLE_MS = 10000;    // hold-off after any daily valve closes
 
 bool dailyFillingL = false, dailyFillingR = false;
 bool dailyDeflatingL = false, dailyDeflatingR = false;
@@ -98,6 +104,9 @@ unsigned long dailyFillStartL = 0, dailyFillStartR = 0;
 unsigned long dailyCooldownL = 0, dailyCooldownR = 0;
 int dailyFillFromL = 0, dailyFillFromR = 0;
 int dailyDeflFromL = 0, dailyDeflFromR = 0;
+unsigned long dailyHighSinceL = 0, dailyLowSinceL = 0;  // when psi went (and stayed) out of band
+unsigned long dailyHighSinceR = 0, dailyLowSinceR = 0;
+unsigned long dailySettleUntil = 0;
 unsigned long lastDailyCheck = 0;
 String modeStatusValue = "";
 String lastDailyWarn = "";
@@ -365,6 +374,9 @@ void resetDailyState() {
   dailyFillingL = dailyFillingR = false;
   dailyDeflatingL = dailyDeflatingR = false;
   dailyCooldownL = dailyCooldownR = 0;
+  dailyHighSinceL = dailyLowSinceL = 0;
+  dailyHighSinceR = dailyLowSinceR = 0;
+  dailySettleUntil = 0;
 }
 
 void setDriveMode(DriveMode m) {
@@ -395,7 +407,8 @@ void serviceDailySide(int psi, int inPin, int outPin,
                       bool &filling, bool &deflating,
                       unsigned long &fillStart, unsigned long &cooldownUntil,
                       bool tankOk, bool &wantsButCant,
-                      int &fillFrom, int &deflFrom, char side) {
+                      int &fillFrom, int &deflFrom,
+                      unsigned long &highSince, unsigned long &lowSince, char side) {
   if (psi < 0) { // no sensor reading — keep this side's valves shut
     filling = false;
     deflating = false;
@@ -408,6 +421,7 @@ void serviceDailySide(int psi, int inPin, int outPin,
     if (psi <= dailyTargetPsi) {
       deflating = false;
       setValve(outPin, false);
+      dailySettleUntil = millis() + DAILY_SETTLE_MS;
       logEvent(String("DDEFL") + side + ":" + String(deflFrom) + ">" + String(psi));
     }
     return;
@@ -417,27 +431,42 @@ void serviceDailySide(int psi, int inPin, int outPin,
     if (psi >= dailyTargetPsi) {
       filling = false;
       setValve(inPin, false);
+      dailySettleUntil = millis() + DAILY_SETTLE_MS;
       logEvent(String("DFILL") + side + ":" + String((millis() - fillStart) / 1000) + "s:" + String(fillFrom) + ">" + String(psi));
     } else if (millis() - fillStart > DAILY_FILL_MAX_MS) {
       filling = false;
       setValve(inPin, false);
       cooldownUntil = millis() + DAILY_COOLDOWN_MS;
+      dailySettleUntil = millis() + DAILY_SETTLE_MS;
       logEvent(String("DFILLCAP") + side + ":" + String(fillFrom) + ">" + String(psi));
       Serial.println("Daily fill attempt capped; cooling down.");
     } else if (!tankOk) {
       filling = false;
       setValve(inPin, false);
+      dailySettleUntil = millis() + DAILY_SETTLE_MS;
       wantsButCant = true;
     }
     return;
   }
 
-  if (psi >= dailyTargetPsi + DAILY_DEFL_HYST) {
+  // Entry gating: track how long the pressure has been continuously out of
+  // band. A road-bump transient resets within a second and never acts; a
+  // real leak or overfill persists past DAILY_SUSTAIN_MS and does.
+  bool high = psi >= dailyTargetPsi + DAILY_DEFL_HYST;
+  bool low = psi <= dailyTargetPsi - DAILY_FILL_HYST || psi < DAILY_MIN_PSI;
+  if (!high) highSince = 0;
+  else if (highSince == 0) highSince = millis();
+  if (!low) lowSince = 0;
+  else if (lowSince == 0) lowSince = millis();
+
+  if (millis() < dailySettleUntil) return; // lines still settling after a close
+
+  if (high && millis() - highSince >= DAILY_SUSTAIN_MS) {
     deflating = true;
     deflFrom = psi;
     setValve(inPin, false);
     setValve(outPin, true);
-  } else if (psi <= dailyTargetPsi - DAILY_FILL_HYST || psi < DAILY_MIN_PSI) {
+  } else if (low && millis() - lowSince >= DAILY_SUSTAIN_MS) {
     if (!tankOk) {
       wantsButCant = true;
     } else if (millis() >= cooldownUntil) {
@@ -457,10 +486,12 @@ void serviceDailyMode() {
 
   serviceDailySide(leftPsi, LEFT_AIR_IN_PIN, LEFT_AIR_OUT_PIN,
                    dailyFillingL, dailyDeflatingL, dailyFillStartL, dailyCooldownL,
-                   tankOk, wantsButCant, dailyFillFromL, dailyDeflFromL, 'L');
+                   tankOk, wantsButCant, dailyFillFromL, dailyDeflFromL,
+                   dailyHighSinceL, dailyLowSinceL, 'L');
   serviceDailySide(rightPsi, RIGHT_AIR_IN_PIN, RIGHT_AIR_OUT_PIN,
                    dailyFillingR, dailyDeflatingR, dailyFillStartR, dailyCooldownR,
-                   tankOk, wantsButCant, dailyFillFromR, dailyDeflFromR, 'R');
+                   tankOk, wantsButCant, dailyFillFromR, dailyDeflFromR,
+                   dailyHighSinceR, dailyLowSinceR, 'R');
 
   bool bagsCritical = ((leftPsi >= 0 && leftPsi < DAILY_MIN_PSI) ||
                        (rightPsi >= 0 && rightPsi < DAILY_MIN_PSI)) && !tankOk;

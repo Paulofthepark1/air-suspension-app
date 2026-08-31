@@ -55,7 +55,10 @@ default 4MB partition scheme.
   connected, persisting across reboots. Refills at target−2 or below the
   5 PSI floor, deflates above target+3, and only opens a fill valve when
   the tank is at least 3 PSI above the target. Fill attempts are capped
-  at 30s with a 45s cooldown so a burst line can't drain the tank. Status
+  at 30s with a 45s cooldown so a burst line can't drain the tank. From
+  fw 2.3.5 the pressure must stay out of band for 5s before a valve
+  opens and the lines get 10s to settle after one closes — road-bump
+  transients no longer trigger the valves while driving. Status
   is published on the mode characteristic (`D:<OK|FILL|DEFL|LOWTANK|LOWBAGS>:<target>`);
   the app shows warnings and raises a system notification when the tank
   is too low to fill (compressor off) or bags drop under 5 PSI unfillable.
