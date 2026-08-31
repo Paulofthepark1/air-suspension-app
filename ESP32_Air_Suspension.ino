@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.3.3"
+#define FW_VERSION "2.3.4"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -611,6 +611,19 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
                    ",Rin=" + String(valveCount[2]) + ",Rout=" + String(valveCount[3]) +
                    ",Dump=" + String(valveCount[4]);
         setOtaStatus(s, false);
+      } else if (rxValue == "INFO") {
+        // Device internals for the diagnostics report: uptime, clock state,
+        // buffered rows/events, log file sizes, free heap
+        size_t histSz = 0, evSz = 0;
+        File f1 = LittleFS.open("/history.csv", FILE_READ);
+        if (f1) { histSz = f1.size(); f1.close(); }
+        File f2 = LittleFS.open("/events.csv", FILE_READ);
+        if (f2) { evSz = f2.size(); f2.close(); }
+        char buf[160];
+        snprintf(buf, sizeof(buf), "INFO:up=%lus,clock=%d,pendRows=%d,pendEv=%d,hist=%uB,ev=%uB,heap=%u",
+                 millis() / 1000, timeSet ? 1 : 0, pendingRowCount, pendingEventCount,
+                 (unsigned)histSz, (unsigned)evSz, (unsigned)ESP.getFreeHeap());
+        setOtaStatus(String(buf), false);
       } else if (rxValue.startsWith("WIFI:")) {
         // Format: WIFI:<ssid>\n<password>  (newline separator — not valid in either field)
         String payload = rxValue.substring(5);
@@ -758,6 +771,8 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
          struct timeval tv = { (time_t)currentEpoch, 0 };
          settimeofday(&tv, NULL);
          flushPendingEvents(); // boot/reset events get their real epochs now
+         flushPendingRows();   // here (BLE task) — same task as GET, so the
+                               // two flush sites can never run concurrently
          Serial.print("Time set! Boot epoch: ");
          Serial.println(bootTimestamp);
       }
@@ -970,7 +985,8 @@ void loop() {
   // the valve can close (seen in the field: 8 -> 13-14 with target 10).
   if (!fwReceiving) {
     bool dailyValveActive = dailyFillingL || dailyFillingR || dailyDeflatingL || dailyDeflatingR;
-    if (timeSet && pendingRowCount > 0) flushPendingRows();
+    // Pending-row flushing happens in the BLE task (TIME and GET handlers),
+    // never here — a loop-task flush could race the BLE-task one.
     if (millis() - lastSensorUpdate > (dailyValveActive ? 100UL : 500UL)) {
       lastSensorUpdate = millis();
 
