@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.3.5"
+#define FW_VERSION "2.3.6"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -108,6 +108,7 @@ unsigned long dailyHighSinceL = 0, dailyLowSinceL = 0;  // when psi went (and st
 unsigned long dailyHighSinceR = 0, dailyLowSinceR = 0;
 unsigned long dailySettleUntil = 0;
 unsigned long lastDailyCheck = 0;
+unsigned int histWriteErrors = 0;   // failed history appends (INFO exposes)
 String modeStatusValue = "";
 String lastDailyWarn = "";
 unsigned long dumpStartMs = 0;
@@ -644,16 +645,43 @@ class MyCmdCallbacks: public BLECharacteristicCallbacks {
         setOtaStatus(s, false);
       } else if (rxValue == "INFO") {
         // Device internals for the diagnostics report: uptime, clock state,
-        // buffered rows/events, log file sizes, free heap
+        // buffered rows/events, history file row count + time span (proves
+        // whether graph gaps are missing on-device or lost in sync), write
+        // errors, free heap
         size_t histSz = 0, evSz = 0;
+        unsigned long hFirst = 0, hLast = 0;
+        unsigned int hRows = 0;
         File f1 = LittleFS.open("/history.csv", FILE_READ);
-        if (f1) { histSz = f1.size(); f1.close(); }
+        if (f1) {
+          histSz = f1.size();
+          String first = f1.readStringUntil('\n');
+          hFirst = strtoul(first.c_str(), NULL, 10);
+          if (first.length() > 0) hRows = 1;
+          uint8_t buf[256];
+          int n;
+          while ((n = f1.read(buf, sizeof(buf))) > 0) {
+            for (int i = 0; i < n; i++) if (buf[i] == '\n') hRows++;
+          }
+          if (histSz > 80) {
+            f1.seek(histSz - 80);
+            f1.readStringUntil('\n'); // discard the partial line
+            while (f1.available()) {
+              String l = f1.readStringUntil('\n');
+              unsigned long e = strtoul(l.c_str(), NULL, 10);
+              if (e > 0) hLast = e;
+            }
+          } else {
+            hLast = hFirst;
+          }
+          f1.close();
+        }
         File f2 = LittleFS.open("/events.csv", FILE_READ);
         if (f2) { evSz = f2.size(); f2.close(); }
-        char buf[160];
-        snprintf(buf, sizeof(buf), "INFO:up=%lus,clock=%d,pendRows=%d,pendEv=%d,hist=%uB,ev=%uB,heap=%u",
+        char buf[220];
+        snprintf(buf, sizeof(buf), "INFO:up=%lus,clock=%d,pendRows=%d,pendEv=%d,hist=%uB/%ur/%lu-%lu,histErr=%u,ev=%uB,heap=%u",
                  millis() / 1000, timeSet ? 1 : 0, pendingRowCount, pendingEventCount,
-                 (unsigned)histSz, (unsigned)evSz, (unsigned)ESP.getFreeHeap());
+                 (unsigned)histSz, hRows, hFirst, hLast, histWriteErrors,
+                 (unsigned)evSz, (unsigned)ESP.getFreeHeap());
         setOtaStatus(String(buf), false);
       } else if (rxValue.startsWith("WIFI:")) {
         // Format: WIFI:<ssid>\n<password>  (newline separator — not valid in either field)
@@ -1258,7 +1286,13 @@ void loop() {
 
   // --- 4. DATA LOGGING (Every 60s; buffered in RAM until the clock is known) ---
   if (!fwReceiving && millis() - lastLogUpdate > 60000) {
+    // Self-check: if this tick itself was starved (loop blocked, task
+    // stuck), record how long — pins down history gaps definitively.
+    unsigned long tickGapMs = millis() - lastLogUpdate;
     lastLogUpdate = millis();
+    if (tickGapMs > 300000) {
+      logEvent("LOGGAP:" + String(tickGapMs / 1000) + "s");
+    }
 
     // In DAILY the meaningful "set" value is the hold target, not the
     // zeroed tow targets
@@ -1312,10 +1346,12 @@ void loop() {
                   tankPsi >= 0 ? tankPsi : 0,
                   setL,
                   setR);
-          file.print(logStr);
+          if (file.print(logStr) == 0) histWriteErrors++;
           file.close();
           Serial.print("Logged: ");
           Serial.print(logStr);
+      } else {
+          histWriteErrors++;
       }
     }
   }
