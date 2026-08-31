@@ -330,6 +330,14 @@ setInterval(() => {
   }
 }, 20000);
 
+// Firmware releases publish a couple of minutes after a merge; re-check
+// periodically while connected so a new version appears without needing
+// to reconnect (skipped mid-transfer so the button doesn't change under
+// an active install).
+setInterval(() => {
+  if (cmdCharacteristic && !updateInProgress) checkLatestFirmware();
+}, 5 * 60 * 1000);
+
 async function sendTimeAndRequestSync() {
   if (!graphCharacteristic) return;
   const currentEpoch = Math.floor(Date.now() / 1000);
