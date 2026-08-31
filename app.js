@@ -199,6 +199,13 @@ async function autoReconnect() {
   if (!navigator.bluetooth || !navigator.bluetooth.getDevices) {
     console.log('Auto-reconnect not supported in this browser.');
     lastAutoResult = 'getDevices unsupported';
+    // Chrome on Android only exposes getDevices() behind a flag — without
+    // it auto-connect is impossible, so say exactly how to turn it on.
+    ui.status.innerText = 'Tap CONNECT to pair';
+    ui.connectHint.innerText = 'Auto-connect needs a one-time Chrome setting: ' +
+      'open chrome://flags in Chrome, search "Web Bluetooth new permissions", ' +
+      'set it to Enabled, and restart Chrome.';
+    ui.connectHint.style.display = 'block';
     return;
   }
   if (isAutoReconnecting || (bleDevice && bleDevice.gatt.connected)) return;
@@ -695,6 +702,14 @@ function handleOtaStatusNotify(event) {
   if (msg.startsWith("Drain ")) {
     setDrainActive(false);
     ui.status.innerText = msg;
+    return;
+  }
+  if (msg.startsWith("INFO:")) {
+    // Device internals (fw >= 2.3.4) — captured silently for the report
+    try {
+      localStorage.setItem('lastInfo', msg.substring(5));
+      localStorage.setItem('lastInfoAt', String(Date.now()));
+    } catch(_) {}
     return;
   }
   if (msg.startsWith("STATS:")) {
@@ -1816,6 +1831,17 @@ function buildDiagnosticsReport() {
   lines.push(`Valve counters (lifetime): ${stats || 'not captured yet'}`);
   const standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
   lines.push(`AutoConnect: api=${!!(navigator.bluetooth && navigator.bluetooth.getDevices)} savedDevices=${lastSavedDeviceCount ?? '?'} standalone=${standalone} failStreak=${autoFailStreak} last="${lastAutoResult}"`);
+  let info = null, infoAge = '';
+  try {
+    info = localStorage.getItem('lastInfo');
+    const at = parseInt(localStorage.getItem('lastInfoAt')) || 0;
+    if (at) infoAge = ` (captured ${Math.round((Date.now() - at) / 60000)}min ago)`;
+  } catch(_) {}
+  lines.push(`Device: ${info ? info + infoAge : 'not captured (fw < 2.3.4 or not connected)'}`);
+  const newestRow = historyData.length ? new Date(historyData[historyData.length - 1].t).toISOString() : 'none';
+  let lastDev = 0;
+  try { lastDev = parseInt(localStorage.getItem('lastDeviceEpoch')) || 0; } catch(_) {}
+  lines.push(`Sync: newestRow=${newestRow} lastDeviceSync=${lastDev ? new Date(lastDev * 1000).toISOString() : 'never'} phase=${syncPhase || 'idle'}`);
 
   const wk = Date.now() - 7 * 86400000;
   const ev7 = eventData.filter(e => e.t >= wk);
@@ -1848,11 +1874,18 @@ function buildDiagnosticsReport() {
 }
 
 async function sendLogsToClaude() {
-  // Grab fresh valve counters first if we're connected
+  // If a history/event sync is mid-flight, give it up to 20s to land so the
+  // report reflects synced data instead of a half-empty archive
+  for (let i = 0; i < 20 && syncPhase; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  // Grab fresh valve counters + device internals first if we're connected
   if (cmdCharacteristic) {
     try {
       statsForReport = true;
       await cmdCharacteristic.writeValue(new TextEncoder('utf-8').encode("STATS"));
+      await new Promise(r => setTimeout(r, 1200));
+      await cmdCharacteristic.writeValue(new TextEncoder('utf-8').encode("INFO"));
       await new Promise(r => setTimeout(r, 1200));
     } catch(_) {}
     statsForReport = false;
