@@ -338,6 +338,15 @@ setInterval(() => {
   if (cmdCharacteristic && !updateInProgress) checkLatestFirmware();
 }, 5 * 60 * 1000);
 
+// An interrupted sync can advance the incremental watermark past rows the
+// phone never received, leaving permanent holes in the archive even though
+// the device's rolling file still has them (seen in the field: device file
+// 100% complete while the phone showed half a day missing). Once a day,
+// re-stream the whole file instead — ~1 min over BLE, dedupes by timestamp
+// — so any hole heals on the next connect.
+let fullHistSyncInFlight = false;
+let fullEvSyncInFlight = false;
+
 async function sendTimeAndRequestSync() {
   if (!graphCharacteristic) return;
   const currentEpoch = Math.floor(Date.now() / 1000);
@@ -351,9 +360,13 @@ async function sendTimeAndRequestSync() {
       let since = 0;
       try { since = parseInt(localStorage.getItem('lastDeviceEpoch')) || 0; } catch(_) {}
       if (!since && historyData.length) since = Math.floor(historyData[historyData.length - 1].t / 1000);
+      let lastFull = 0;
+      try { lastFull = parseInt(localStorage.getItem('lastFullSync')) || 0; } catch(_) {}
+      fullHistSyncInFlight = Date.now() - lastFull > 86400000;
       syncPhase = 'hist';
       syncPhaseAt = Date.now();
-      const cmd = supportsIncrementalSync() && since ? "GET:" + Math.max(0, since - 600) : "GET";
+      const cmd = (!fullHistSyncInFlight && supportsIncrementalSync() && since)
+        ? "GET:" + Math.max(0, since - 600) : "GET";
       await graphCharacteristic.writeValue(encoder.encode(cmd));
     }, 500); // Give ESP32 a moment to process the time setting
   } catch(e) {
@@ -365,11 +378,15 @@ async function requestEventSync() {
   if (!graphCharacteristic || !supportsEvents()) { syncPhase = null; return; }
   let since = 0;
   try { since = parseInt(localStorage.getItem('lastEventEpoch')) || 0; } catch(_) {}
+  let lastFull = 0;
+  try { lastFull = parseInt(localStorage.getItem('lastFullEvSync')) || 0; } catch(_) {}
+  fullEvSyncInFlight = Date.now() - lastFull > 86400000;
   syncPhase = 'ev';
   syncPhaseAt = Date.now();
   try {
     const encoder = new TextEncoder('utf-8');
-    await graphCharacteristic.writeValue(encoder.encode(since ? "GETEV:" + Math.max(0, since - 600) : "GETEV"));
+    const cmd = (!fullEvSyncInFlight && since) ? "GETEV:" + Math.max(0, since - 600) : "GETEV";
+    await graphCharacteristic.writeValue(encoder.encode(cmd));
   } catch(e) {
     console.error("Event sync failed", e);
     syncPhase = null;
@@ -1074,10 +1091,18 @@ function handleGraphData(event) {
     if (syncPhase === 'ev') {
       console.log("Event sync complete");
       parseAndSaveEvents(graphBuffer);
+      if (fullEvSyncInFlight) {
+        fullEvSyncInFlight = false;
+        try { localStorage.setItem('lastFullEvSync', String(Date.now())); } catch(_) {}
+      }
       syncPhase = null;
     } else {
       console.log("Graph sync complete");
       parseAndSaveGraphData(graphBuffer);
+      if (fullHistSyncInFlight) {
+        fullHistSyncInFlight = false;
+        try { localStorage.setItem('lastFullSync', String(Date.now())); } catch(_) {}
+      }
       if (syncPhase === 'hist') requestEventSync();
       else syncPhase = null;
     }
