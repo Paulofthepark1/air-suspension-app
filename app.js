@@ -1854,6 +1854,37 @@ ui.btnStats.addEventListener('click', async () => {
 // on the repo. One tap + Submit; Claude reads and analyzes it from there.
 let statsForReport = false;
 
+// True tank leak rate: the longest stretch (last 7d) where the tank never
+// rises (compressor off) gives the combined tank+fitting+check-valve leak.
+// Individual bag fills cost well under 0.1 PSI of tank each, so they
+// barely pollute the slope.
+function estimateTankLeak() {
+  const cutoff = Date.now() - 7 * 86400000;
+  let best = null;
+  let start = null;
+  const rows = historyData.filter(p => p.t >= cutoff && p.tk != null);
+  const consider = (s, e) => {
+    const hours = (e.t - s.t) / 3600000;
+    if (hours >= 6 && (!best || hours > best.hours)) {
+      best = { hours, drop: s.tk - e.tk, end: e.t };
+    }
+  };
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1], b = rows[i];
+    const broke = (b.t - a.t > 10 * 60000) || (b.tk > a.tk + 1); // gap or compressor
+    if (broke) {
+      if (start) consider(start, a);
+      start = null;
+    } else if (!start) {
+      start = a;
+    }
+  }
+  if (start && rows.length) consider(start, rows[rows.length - 1]);
+  if (!best) return 'insufficient data (needs a 6h+ compressor-off stretch)';
+  const perDay = (best.drop / best.hours) * 24;
+  return `~${perDay.toFixed(1)} PSI/day (measured over ${Math.round(best.hours)}h ending ${new Date(best.end).toISOString().substring(0, 16)}Z)`;
+}
+
 function buildDiagnosticsReport() {
   const lines = [];
   lines.push(`Generated: ${new Date().toString()}`);
@@ -1890,6 +1921,7 @@ function buildDiagnosticsReport() {
   const day = Date.now() - 86400000;
   const rows24 = historyData.filter(p => p.t >= day).length;
   lines.push(`History rows last 24h: ${rows24} (~1440 = continuous logging)`);
+  lines.push(`Tank leak: ${estimateTankLeak()}`);
   lines.push('');
   lines.push('Recent events (newest first):');
   lines.push('```');
