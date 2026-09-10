@@ -321,10 +321,15 @@ function onConnected() {
 let syncPhase = null; // 'hist' → 'ev' → null
 let syncPhaseAt = 0;
 
-// A lost END must not wedge the phase machine forever
+// A lost END must not wedge the phase machine forever. The timer is
+// inactivity-based: every received chunk refreshes syncPhaseAt, so only a
+// stream that has gone silent for 60s is declared stuck. (A fixed
+// phase-duration timeout fired mid-transfer on the ~40-60s daily full
+// re-streams, wiping the buffer and silently cancelling the event sync —
+// seen in the field as the event log frozen for a week.)
 setInterval(() => {
   if (syncPhase && Date.now() - syncPhaseAt > 60000) {
-    console.warn('Sync phase timed out, resetting');
+    console.warn('Sync stream silent for 60s, resetting');
     syncPhase = null;
     graphBuffer = "";
   }
@@ -1090,7 +1095,8 @@ function handleGraphData(event) {
   if (chunk === "END") {
     if (syncPhase === 'ev') {
       console.log("Event sync complete");
-      parseAndSaveEvents(graphBuffer);
+      const n = parseAndSaveEvents(graphBuffer);
+      recordSyncCount('ev', n);
       if (fullEvSyncInFlight) {
         fullEvSyncInFlight = false;
         try { localStorage.setItem('lastFullEvSync', String(Date.now())); } catch(_) {}
@@ -1098,7 +1104,8 @@ function handleGraphData(event) {
       syncPhase = null;
     } else {
       console.log("Graph sync complete");
-      parseAndSaveGraphData(graphBuffer);
+      const n = parseAndSaveGraphData(graphBuffer);
+      recordSyncCount('hist', n);
       if (fullHistSyncInFlight) {
         fullHistSyncInFlight = false;
         try { localStorage.setItem('lastFullSync', String(Date.now())); } catch(_) {}
@@ -1109,12 +1116,24 @@ function handleGraphData(event) {
     graphBuffer = ""; // reset
   } else {
     graphBuffer += chunk;
+    syncPhaseAt = Date.now(); // stream is alive — keep the watchdog at bay
   }
+}
+
+// Rows received in the most recent sync of each kind — proves whether a
+// stream delivered data (diagnostics report shows it as SyncStats:)
+function recordSyncCount(kind, n) {
+  try {
+    const s = JSON.parse(localStorage.getItem('lastSyncCounts') || '{}');
+    s[kind] = n;
+    s[kind + 'At'] = Date.now();
+    localStorage.setItem('lastSyncCounts', JSON.stringify(s));
+  } catch(_) {}
 }
 
 function parseAndSaveGraphData(csvStr) {
   const incoming = parseCsvRows(csvStr);
-  if (!incoming.length) return;
+  if (!incoming.length) return 0;
 
   // Remember the newest device-sourced timestamp for the next incremental sync
   const maxIncoming = Math.floor(Math.max(...incoming.map(p => p.t)) / 1000);
@@ -1132,6 +1151,7 @@ function parseAndSaveGraphData(csvStr) {
   if (ui.graphModal.style.display === "block") {
     graphScheduleDraw();
   }
+  return incoming.length;
 }
 
 let lastHistorySave = 0;
@@ -1218,7 +1238,7 @@ loadEvents();
 
 function parseAndSaveEvents(csvStr) {
   const incoming = parseEventRows(csvStr);
-  if (!incoming.length) return;
+  if (!incoming.length) return 0;
 
   const byKey = new Map(eventData.map(e => [e.t + '|' + e.code, e]));
   incoming.forEach(e => byKey.set(e.t + '|' + e.code, e));
@@ -1233,6 +1253,7 @@ function parseAndSaveEvents(csvStr) {
   } catch(e) {
     console.warn("Could not persist event log", e);
   }
+  return incoming.length;
 }
 
 const RESET_WARN = { crash: true, brownout: true, watchdog: true };
@@ -1906,6 +1927,11 @@ function buildDiagnosticsReport() {
   let lastDev = 0;
   try { lastDev = parseInt(localStorage.getItem('lastDeviceEpoch')) || 0; } catch(_) {}
   lines.push(`Sync: newestRow=${newestRow} lastDeviceSync=${lastDev ? new Date(lastDev * 1000).toISOString() : 'never'} phase=${syncPhase || 'idle'}`);
+  try {
+    const s = JSON.parse(localStorage.getItem('lastSyncCounts') || '{}');
+    const ago = (at) => at ? Math.round((Date.now() - at) / 60000) + 'min ago' : 'never';
+    lines.push(`SyncStats: histRows=${s.hist ?? '?'} (${ago(s.histAt)}) evRows=${s.ev ?? '?'} (${ago(s.evAt)})`);
+  } catch(_) {}
 
   const wk = Date.now() - 7 * 86400000;
   const ev7 = eventData.filter(e => e.t >= wk);
@@ -1939,9 +1965,10 @@ function buildDiagnosticsReport() {
 }
 
 async function sendLogsToClaude() {
-  // If a history/event sync is mid-flight, give it up to 20s to land so the
-  // report reflects synced data instead of a half-empty archive
-  for (let i = 0; i < 20 && syncPhase; i++) {
+  // If a history/event sync is mid-flight, give it up to 90s to land so the
+  // report reflects synced data instead of a half-empty archive (a daily
+  // full re-stream of a large history file takes 40-60s)
+  for (let i = 0; i < 90 && syncPhase; i++) {
     await new Promise(r => setTimeout(r, 1000));
   }
   // Grab fresh valve counters + device internals first if we're connected
