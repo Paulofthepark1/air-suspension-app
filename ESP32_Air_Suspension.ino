@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.4.4"
+#define FW_VERSION "2.4.5"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -270,6 +270,45 @@ const int PENDING_ROWS_MAX = 1440;
 PendingRow pendingRows[PENDING_ROWS_MAX];
 int pendingRowCount = 0;
 int pendingRowHead = 0;
+
+// The history file is capped, and it used to be deleted outright when it
+// filled — up to 8.5 days of rows gone in one tick. That is silent data
+// loss whenever the phone is behind (seen in the field: the phone's
+// archive a week stale while the device file sat 3 KB over the cap, one
+// log tick away from taking the whole record with it). Keep the newest
+// half instead. Returns false if anything goes wrong, so the caller can
+// fall back to the old wipe rather than let the file grow unbounded.
+bool trimHistoryFile() {
+  File src = LittleFS.open("/history.csv", FILE_READ);
+  if (!src) return false;
+  size_t sz = src.size();
+  src.seek(sz / 2);
+  src.readStringUntil('\n'); // resume on a row boundary, not mid-row
+  LittleFS.remove("/history.tmp");
+  File dst = LittleFS.open("/history.tmp", FILE_WRITE);
+  if (!dst) {
+    src.close();
+    return false;
+  }
+  uint8_t buf[512];
+  bool ok = true;
+  while (src.available()) {
+    int n = src.read(buf, sizeof(buf));
+    if (n <= 0) break;
+    if (dst.write(buf, n) != (size_t)n) {
+      ok = false;
+      break;
+    }
+  }
+  dst.close();
+  src.close();
+  if (!ok) {
+    LittleFS.remove("/history.tmp");
+    return false;
+  }
+  LittleFS.remove("/history.csv");
+  return LittleFS.rename("/history.tmp", "/history.csv");
+}
 
 void flushPendingRows() {
   if (pendingRowCount == 0 || !timeSet) return;
@@ -1428,11 +1467,11 @@ void loop() {
     } else {
       unsigned long currentEpoch = bootTimestamp + (millis() / 1000);
 
-      // Rolling buffer: the app archives on every connect, so once the file
-      // gets big just start fresh instead of filling LittleFS.
-      // Also check the last byte: a power cut mid-write leaves a partial row
-      // with no newline, and appending onto it would glue two rows together
-      // into a corrupt timestamp.
+      // Rolling buffer: once the file passes the cap, drop the oldest half
+      // instead of deleting the whole thing. Also check the last byte: a
+      // power cut mid-write leaves a partial row with no newline, and
+      // appending onto it would glue two rows together into a corrupt
+      // timestamp.
       bool needsNewline = false;
       if (!isStreamingGraph) {
         File check = LittleFS.open("/history.csv", FILE_READ);
@@ -1444,9 +1483,13 @@ void loop() {
           }
           check.close();
           if (sz > HISTORY_MAX_BYTES) {
-            LittleFS.remove("/history.csv");
-            needsNewline = false;
-            Serial.println("History buffer full — starting a fresh file.");
+            if (trimHistoryFile()) {
+              Serial.println("History buffer full — dropped the oldest half.");
+            } else {
+              LittleFS.remove("/history.csv");
+              needsNewline = false;
+              Serial.println("History trim failed — starting a fresh file.");
+            }
           }
         }
       }
