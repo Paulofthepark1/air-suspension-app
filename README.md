@@ -92,7 +92,9 @@ the house repo `Paulofthepark1/homeassistant`, `esphome/truck-led-display.yaml`)
   watchdog ends a transfer whose sender disconnected.
 - **Readings broadcast without a connection.** The scan response carries
   manufacturer data (company id `0xFFFF`, private use), updated on change at most
-  every 2 s. Active scanners only. 14 bytes after the AD header:
+  every 2 s and refreshed every 30 s. Active scanners only. **Actually sent from fw 2.4.1**
+  (2.4.0 compiled it out: it used the Bluedroid API, and the ESP32-S3 core is built with
+  NimBLE). 14 bytes after the AD header:
 
   | Byte | Meaning |
   |---|---|

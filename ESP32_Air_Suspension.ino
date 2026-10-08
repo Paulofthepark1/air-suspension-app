@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.4.0"
+#define FW_VERSION "2.4.1"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -895,11 +895,15 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
 };
 
 // Push the current readings into the scan response (see STATUS BROADCAST).
-// Only when something changed, and at most every 2 s: each update makes the
-// BLE library re-issue start-advertising, so it must not churn.
+// When something changed (at most every 2 s), plus a refresh every 30 s so a
+// BLE host reset can't leave the screen without numbers until the next change.
+// Goes through the BLE library's own setScanResponseData, which calls the
+// right stack: fw 2.4.0 called the Bluedroid API inside an
+// #if CONFIG_BLUEDROID_ENABLED, and the ESP32-S3 Arduino core is built with
+// NimBLE — so the whole broadcast compiled away and 2.4.0 never sent it.
 void updateBroadcast() {
-#if defined(CONFIG_BLUEDROID_ENABLED)
   if (broadcastSet && millis() - lastBroadcastMs < 2000) return;
+  const bool refresh = !broadcastSet || millis() - lastBroadcastMs >= 30000;
   auto psiByte = [](int p) -> uint8_t { return p < 0 ? 255 : (uint8_t)(p > 254 ? 254 : p); };
   uint8_t flags = 0;
   if (drainPhase != DRAIN_OFF) flags |= 0x01;
@@ -915,13 +919,14 @@ void updateBroadcast() {
     (uint8_t)dailyTargetPsi, flags,
     psiByte(targetLeftPsi), psiByte(targetRightPsi)
   };
-  if (broadcastSet && memcmp(adv, lastBroadcast, sizeof(adv)) == 0) return;
-  if (esp_ble_gap_config_scan_rsp_data_raw(adv, sizeof(adv)) == ESP_OK) {
+  if (!refresh && memcmp(adv, lastBroadcast, sizeof(adv)) == 0) return;
+  BLEAdvertisementData scanResponse;
+  scanResponse.addData((char *)adv, sizeof(adv)); // a complete AD structure, raw
+  if (BLEDevice::getAdvertising()->setScanResponseData(scanResponse)) {
     memcpy(lastBroadcast, adv, sizeof(adv));
     broadcastSet = true;
     lastBroadcastMs = millis();
   }
-#endif
 }
 
 void setup() {
