@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.3.6"
+#define FW_VERSION "2.4.0"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -57,8 +57,14 @@ uint32_t fwChunkCount = 0;
 unsigned long fwLastChunkTime = 0;
 #define FW_ACK_EVERY 64   // chunks per FWACK (must match the app)
 
-bool deviceConnected = false;
+bool deviceConnected = false;      // at least one client connected
 bool oldDeviceConnected = false;
+// fw 2.4.0: up to MAX_CONN clients at once (the phone app + the truck's dash
+// screen), so the screen never locks the phone out. connCount is changed only
+// in the BLE task; loop() reads it.
+const int MAX_CONN = 3;
+volatile int connCount = 0;
+int lastConnCount = 0;
 
 // State Tracking (-1 means no sensor / no reading)
 int leftPsi = -1;
@@ -77,6 +83,20 @@ ControlState leftState = IDLE;
 ControlState rightState = IDLE;
 
 bool commandReceived = false; // Solenoids stay off until user sends SET
+
+// ---- STATUS BROADCAST (fw 2.4.0) ----
+// The live readings ride in the BLE scan response as manufacturer data, so
+// a nearby screen can show them WITHOUT connecting (the truck dash screen
+// does). Layout (14 bytes after the AD header): FF FF (company id 0xFFFF,
+// "no company" / private use), 'A' 'B', layout version 1, left psi, right
+// psi, tank psi (0-150, 255 = no sensor), mode (0 TOW, 1 DAILY), daily
+// status (0 OK, 1 FILL, 2 DEFL, 3 LOWTANK, 4 LOWBAGS), daily target, flags
+// (bit0 air-down running, bit1 TOW adjustment running, bit2 firmware
+// transfer, bit3 a client is connected), TOW target left, TOW target right.
+uint8_t dailyStatusCode = 0;
+uint8_t lastBroadcast[16];
+bool broadcastSet = false;
+unsigned long lastBroadcastMs = 0;
 
 // ---- DRIVE MODES ----
 // TOW: manual SET control (original behavior).
@@ -497,11 +517,11 @@ void serviceDailyMode() {
   bool bagsCritical = ((leftPsi >= 0 && leftPsi < DAILY_MIN_PSI) ||
                        (rightPsi >= 0 && rightPsi < DAILY_MIN_PSI)) && !tankOk;
   String st;
-  if (bagsCritical) st = "LOWBAGS";
-  else if (wantsButCant) st = "LOWTANK";
-  else if (dailyFillingL || dailyFillingR) st = "FILL";
-  else if (dailyDeflatingL || dailyDeflatingR) st = "DEFL";
-  else st = "OK";
+  if (bagsCritical) { st = "LOWBAGS"; dailyStatusCode = 4; }
+  else if (wantsButCant) { st = "LOWTANK"; dailyStatusCode = 3; }
+  else if (dailyFillingL || dailyFillingR) { st = "FILL"; dailyStatusCode = 1; }
+  else if (dailyDeflatingL || dailyDeflatingR) { st = "DEFL"; dailyStatusCode = 2; }
+  else { st = "OK"; dailyStatusCode = 0; }
 
   // Log warning transitions to the event log
   if ((st == "LOWTANK" || st == "LOWBAGS") && st != lastDailyWarn) {
@@ -522,14 +542,19 @@ void abortFwTransfer(const String& reason) {
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
+      connCount++;
       deviceConnected = true;
+      // Advertising stops when a client connects; keep it going so a second
+      // client can still find us (and the status broadcast keeps flowing).
+      if (connCount < MAX_CONN) BLEDevice::startAdvertising();
     };
     void onDisconnect(BLEServer* pServer) {
-      deviceConnected = false;
+      if (connCount > 0) connCount--;
+      deviceConnected = connCount > 0;
       if (drainPhase != DRAIN_OFF) {
         // A deliberate, time-capped air-down keeps running through a
         // dropped connection — don't release its valves here.
-        if (fwReceiving) {
+        if (fwReceiving && connCount == 0) {
           fwReceiving = false;
           Update.abort();
         }
@@ -538,6 +563,8 @@ class MyServerCallbacks: public BLEServerCallbacks {
       setValve(TANK_DUMP_PIN, false); // never leave the dump latched
       if (driveMode == MODE_TOW) {
         // Safety stop on disconnect — manual control needs a live phone.
+        // Unchanged with two clients: EITHER one dropping stops a TOW
+        // adjustment in progress (fail safe; re-send SET to resume).
         // DAILY maintenance is autonomous and keeps running.
         commandReceived = false;
         stopAllSolenoids();
@@ -546,7 +573,11 @@ class MyServerCallbacks: public BLEServerCallbacks {
         leftState = IDLE;
         rightState = IDLE;
       }
-      if (fwReceiving) {
+      // A firmware transfer belongs to one client. Abort at once only when
+      // nobody is left; if another client stays connected (the dash screen),
+      // the 30s stall watchdog in loop() aborts a transfer whose sender left —
+      // so the screen dropping off can never kill the phone's update.
+      if (fwReceiving && connCount == 0) {
         fwReceiving = false;
         Update.abort();
         Serial.println("FW transfer aborted: BLE disconnected");
@@ -863,6 +894,36 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
     }
 };
 
+// Push the current readings into the scan response (see STATUS BROADCAST).
+// Only when something changed, and at most every 2 s: each update makes the
+// BLE library re-issue start-advertising, so it must not churn.
+void updateBroadcast() {
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  if (broadcastSet && millis() - lastBroadcastMs < 2000) return;
+  auto psiByte = [](int p) -> uint8_t { return p < 0 ? 255 : (uint8_t)(p > 254 ? 254 : p); };
+  uint8_t flags = 0;
+  if (drainPhase != DRAIN_OFF) flags |= 0x01;
+  if (driveMode == MODE_TOW && commandReceived && (leftState != IDLE || rightState != IDLE)) flags |= 0x02;
+  if (fwReceiving) flags |= 0x04;
+  if (connCount > 0) flags |= 0x08;
+  uint8_t adv[16] = {
+    15, 0xFF,                          // AD length, type = manufacturer specific
+    0xFF, 0xFF, 'A', 'B', 1,           // company 0xFFFF, magic, layout version
+    psiByte(leftPsi), psiByte(rightPsi), psiByte(tankPsi),
+    (uint8_t)(driveMode == MODE_DAILY ? 1 : 0),
+    (uint8_t)(driveMode == MODE_DAILY ? dailyStatusCode : 0),
+    (uint8_t)dailyTargetPsi, flags,
+    psiByte(targetLeftPsi), psiByte(targetRightPsi)
+  };
+  if (broadcastSet && memcmp(adv, lastBroadcast, sizeof(adv)) == 0) return;
+  if (esp_ble_gap_config_scan_rsp_data_raw(adv, sizeof(adv)) == ESP_OK) {
+    memcpy(lastBroadcast, adv, sizeof(adv));
+    broadcastSet = true;
+    lastBroadcastMs = millis();
+  }
+#endif
+}
+
 void setup() {
   Serial.begin(115200);
 
@@ -972,6 +1033,8 @@ void setup() {
   pAdvertising->setScanResponse(false);
   pAdvertising->setMinPreferred(0x0);
   BLEDevice::startAdvertising();
+  // The status broadcast starts with the first sensor pass in loop(), after
+  // the library's async advertising setup has finished.
   Serial.println("Firmware v" FW_VERSION " — waiting for a client connection...");
 }
 
@@ -1109,6 +1172,8 @@ void loop() {
       }
       pCharTank->setValue((uint8_t*)tStr, strlen(tStr));
       if (deviceConnected) pCharTank->notify();
+
+      updateBroadcast();
     }
 
     // --- 2pre. FULL AIR-DOWN SEQUENCE (bags, then tank) ---
@@ -1237,11 +1302,17 @@ void loop() {
     saveValveCounters();
   }
 
-  // Handle disconnect
-  if (!deviceConnected && oldDeviceConnected) {
-      delay(500);
+  // Handle disconnect. Advertising normally keeps running through
+  // connections (onConnect restarts it), but not once MAX_CONN is reached —
+  // so make sure we are discoverable again whenever a client leaves.
+  int cc = connCount;
+  if (cc < lastConnCount) {
+      if (cc == 0) delay(500); // original settle time; never block while a client is still connected (TOW loop)
       pServer->startAdvertising();
       Serial.println("Start advertising");
+  }
+  lastConnCount = cc;
+  if (!deviceConnected && oldDeviceConnected) {
       oldDeviceConnected = deviceConnected;
   }
 
