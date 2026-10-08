@@ -79,6 +79,33 @@ default 4MB partition scheme.
 | `GET` / `GET:<epoch>` | (graph char) Stream history CSV; with epoch, only newer rows |
 | `GETEV` / `GETEV:<epoch>` | (graph char) Stream the event log |
 
+## Two clients + status broadcast (fw ≥ 2.4.0)
+
+Built for the truck's dash screen (an ESP32-S3 touch panel in the cab, set up from
+the house repo `Paulofthepark1/homeassistant`, `esphome/truck-led-display.yaml`).
+
+- **Up to 3 clients at once.** Advertising restarts after each connect, so the
+  phone app and the screen can both be connected; neither locks the other out.
+  With one client, behaviour is unchanged. Either client dropping still stops a
+  TOW adjustment in progress (fail safe — re-send SET). A firmware transfer is
+  aborted at once only when no client is left; otherwise the 30 s stall
+  watchdog ends a transfer whose sender disconnected.
+- **Readings broadcast without a connection.** The scan response carries
+  manufacturer data (company id `0xFFFF`, private use), updated on change at most
+  every 2 s. Active scanners only. 14 bytes after the AD header:
+
+  | Byte | Meaning |
+  |---|---|
+  | 0–1 | `FF FF` company id |
+  | 2–3 | `'A' 'B'` magic |
+  | 4 | layout version (`1`) |
+  | 5, 6, 7 | left, right, tank PSI (0–150; `255` = no sensor) |
+  | 8 | mode: `0` TOW, `1` DAILY |
+  | 9 | DAILY status: `0` OK, `1` FILL, `2` DEFL, `3` LOWTANK, `4` LOWBAGS (`0` in TOW) |
+  | 10 | DAILY target PSI |
+  | 11 | flags: bit0 air-down running, bit1 TOW adjustment running, bit2 firmware transfer, bit3 a client is connected |
+  | 12, 13 | TOW target left, right |
+
 ## Event log (fw ≥ 2.2.0)
 
 `/events.csv` records reboots (with `esp_reset_reason` — poweron / crash /
