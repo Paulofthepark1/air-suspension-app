@@ -95,8 +95,8 @@ bool commandReceived = false; // Solenoids stay off until user sends SET
 // transfer, bit3 a client is connected), TOW target left, TOW target right.
 // fw 2.4.3: the essentials ALSO ride in the main advertisement, because a scan
 // response needs a request/reply exchange that a screen at the edge of range
-// mostly loses (the dash screen in the house heard the name every few seconds
-// and the readings every few minutes). Main advert = flags + service UUID +
+// mostly loses (on the truck's own dash, -88..-97 dBm to the under-bed box, the
+// screen heard the name every few seconds and the readings every few minutes). Main advert = flags + service UUID +
 // a 10-byte AD: FF FF, 'a' (short layout), left, right, tank psi, packed
 // (bit7 DAILY, bits4-6 daily status, bits0-3 flags), daily target. 31 bytes
 // exactly, so the name moves to the scan response (Web Bluetooth's picker
