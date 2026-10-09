@@ -110,8 +110,8 @@ the house repo `Paulofthepark1/homeassistant`, `esphome/truck-led-display.yaml`)
 
 - **From fw 2.4.3 the essentials are in the main advertisement too.** A scan response
   is a request/reply exchange, and a screen at the edge of range loses most of them:
-  from inside the house the dash screen heard the controller's name every few seconds
-  and its readings every few minutes. The main advert is now flags + the service UUID +
+  from the truck's own dash (−88 to −97 dBm to the under-bed box) the screen heard the
+  controller's name every few seconds and its readings every few minutes. The main advert is now flags + the service UUID +
   this 10-byte AD (31 bytes exactly), so every advert that arrives carries the numbers:
 
   | Byte | Meaning |
@@ -127,6 +127,9 @@ the house repo `Paulofthepark1/homeassistant`, `esphome/truck-led-display.yaml`)
   The device name moves to the scan response to make room. The app is unaffected: its
   picker also matches the service UUID, which stays in the main advert, and a saved
   device reconnects by its stored name.
+- **From fw 2.4.4 BLE transmits at +20 dBm** (the S3's maximum; the default was +9).
+  From the truck's dash the screen heard the controller in the under-bed box at only
+  −91 to −97 dBm, so every advert, notification and connection gets 11 dB more.
 
 ## Event log (fw ≥ 2.2.0)
 

@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.4.3"
+#define FW_VERSION "2.4.4"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -95,8 +95,8 @@ bool commandReceived = false; // Solenoids stay off until user sends SET
 // transfer, bit3 a client is connected), TOW target left, TOW target right.
 // fw 2.4.3: the essentials ALSO ride in the main advertisement, because a scan
 // response needs a request/reply exchange that a screen at the edge of range
-// mostly loses (the dash screen in the house heard the name every few seconds
-// and the readings every few minutes). Main advert = flags + service UUID +
+// mostly loses (on the truck's own dash, -88..-97 dBm to the under-bed box, the
+// screen heard the name every few seconds and the readings every few minutes). Main advert = flags + service UUID +
 // a 10-byte AD: FF FF, 'a' (short layout), left, right, tank psi, packed
 // (bit7 DAILY, bits4-6 daily status, bits0-3 flags), daily target. 31 bytes
 // exactly, so the name moves to the scan response (Web Bluetooth's picker
@@ -1011,6 +1011,14 @@ void setup() {
 
   BLEDevice::init("Air Bags");
   BLEDevice::setMTU(517); // large MTU speeds up BLE firmware transfer
+  // fw 2.4.4: full BLE transmit power. The S3's default is +9 dBm and it can do
+  // +20; from the truck's dash the screen heard this controller at only -91 to
+  // -97 dBm (the controller sits in the under-bed box, behind the cab and the
+  // bed). +11 dB on every advert, notification and connection. Controller API
+  // via the library, so it is the same call on NimBLE and Bluedroid builds.
+  BLEDevice::setPower(ESP_PWR_LVL_P20, ESP_BLE_PWR_TYPE_DEFAULT);
+  BLEDevice::setPower(ESP_PWR_LVL_P20, ESP_BLE_PWR_TYPE_ADV);
+  BLEDevice::setPower(ESP_PWR_LVL_P20, ESP_BLE_PWR_TYPE_SCAN);
 
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
