@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.4.3"
+#define FW_VERSION "2.4.4"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -1011,6 +1011,14 @@ void setup() {
 
   BLEDevice::init("Air Bags");
   BLEDevice::setMTU(517); // large MTU speeds up BLE firmware transfer
+  // fw 2.4.4: full BLE transmit power. The S3's default is +9 dBm and it can do
+  // +20; from the truck's dash the screen heard this controller at only -91 to
+  // -97 dBm (the controller sits in the under-bed box, behind the cab and the
+  // bed). +11 dB on every advert, notification and connection. Controller API
+  // via the library, so it is the same call on NimBLE and Bluedroid builds.
+  BLEDevice::setPower(ESP_PWR_LVL_P20, ESP_BLE_PWR_TYPE_DEFAULT);
+  BLEDevice::setPower(ESP_PWR_LVL_P20, ESP_BLE_PWR_TYPE_ADV);
+  BLEDevice::setPower(ESP_PWR_LVL_P20, ESP_BLE_PWR_TYPE_SCAN);
 
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
