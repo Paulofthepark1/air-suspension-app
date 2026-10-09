@@ -23,7 +23,7 @@
 #include <esp_system.h>
 #include <sys/time.h>
 
-#define FW_VERSION "2.4.1"
+#define FW_VERSION "2.4.3"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pCharLeft = NULL;
@@ -93,6 +93,15 @@ bool commandReceived = false; // Solenoids stay off until user sends SET
 // status (0 OK, 1 FILL, 2 DEFL, 3 LOWTANK, 4 LOWBAGS), daily target, flags
 // (bit0 air-down running, bit1 TOW adjustment running, bit2 firmware
 // transfer, bit3 a client is connected), TOW target left, TOW target right.
+// fw 2.4.3: the essentials ALSO ride in the main advertisement, because a scan
+// response needs a request/reply exchange that a screen at the edge of range
+// mostly loses (the dash screen in the house heard the name every few seconds
+// and the readings every few minutes). Main advert = flags + service UUID +
+// a 10-byte AD: FF FF, 'a' (short layout), left, right, tank psi, packed
+// (bit7 DAILY, bits4-6 daily status, bits0-3 flags), daily target. 31 bytes
+// exactly, so the name moves to the scan response (Web Bluetooth's picker
+// still matches the service UUID in the main advert; saved devices reconnect
+// by their stored name). The scan response keeps the full 16-byte layout.
 uint8_t dailyStatusCode = 0;
 uint8_t lastBroadcast[16];
 bool broadcastSet = false;
@@ -894,13 +903,14 @@ class MyGraphCallbacks: public BLECharacteristicCallbacks {
     }
 };
 
-// Push the current readings into the scan response (see STATUS BROADCAST).
+// Push the current readings into the advertisement (see STATUS BROADCAST).
 // When something changed (at most every 2 s), plus a refresh every 30 s so a
 // BLE host reset can't leave the screen without numbers until the next change.
-// Goes through the BLE library's own setScanResponseData, which calls the
-// right stack: fw 2.4.0 called the Bluedroid API inside an
-// #if CONFIG_BLUEDROID_ENABLED, and the ESP32-S3 Arduino core is built with
-// NimBLE — so the whole broadcast compiled away and 2.4.0 never sent it.
+// Goes through the BLE library's own setters, which call the right stack:
+// fw 2.4.0 called the Bluedroid API inside an #if CONFIG_BLUEDROID_ENABLED,
+// and the ESP32-S3 Arduino core is built with NimBLE — so the whole broadcast
+// compiled away and 2.4.0 never sent it. Once custom advertising data is set,
+// the library's start() leaves it alone, so connect/disconnect restarts keep it.
 void updateBroadcast() {
   if (broadcastSet && millis() - lastBroadcastMs < 2000) return;
   const bool refresh = !broadcastSet || millis() - lastBroadcastMs >= 30000;
@@ -910,19 +920,40 @@ void updateBroadcast() {
   if (driveMode == MODE_TOW && commandReceived && (leftState != IDLE || rightState != IDLE)) flags |= 0x02;
   if (fwReceiving) flags |= 0x04;
   if (connCount > 0) flags |= 0x08;
+  const uint8_t daily = driveMode == MODE_DAILY ? 1 : 0;
+  const uint8_t status = daily ? dailyStatusCode : 0;
   uint8_t adv[16] = {
     15, 0xFF,                          // AD length, type = manufacturer specific
     0xFF, 0xFF, 'A', 'B', 1,           // company 0xFFFF, magic, layout version
     psiByte(leftPsi), psiByte(rightPsi), psiByte(tankPsi),
-    (uint8_t)(driveMode == MODE_DAILY ? 1 : 0),
-    (uint8_t)(driveMode == MODE_DAILY ? dailyStatusCode : 0),
+    daily, status,
     (uint8_t)dailyTargetPsi, flags,
     psiByte(targetLeftPsi), psiByte(targetRightPsi)
   };
   if (!refresh && memcmp(adv, lastBroadcast, sizeof(adv)) == 0) return;
+
+  // Main advertisement: flags + service UUID (18) + short readings (10) = 31.
+  uint8_t shortAd[10] = {
+    9, 0xFF, 0xFF, 0xFF, 'a',
+    adv[7], adv[8], adv[9],
+    (uint8_t)((daily << 7) | ((status & 0x07) << 4) | (flags & 0x0F)),
+    (uint8_t)dailyTargetPsi
+  };
+  BLEAdvertisementData primary;
+  primary.setFlags(0x06);                 // LE general discoverable, no BR/EDR
+  primary.setCompleteServices(BLEUUID(SERVICE_UUID));
+  primary.addData((char *)shortAd, sizeof(shortAd));
+  // Scan response: the name (moved here to make room) + the full layout.
   BLEAdvertisementData scanResponse;
+  scanResponse.setName("Air Bags");
   scanResponse.addData((char *)adv, sizeof(adv)); // a complete AD structure, raw
-  if (BLEDevice::getAdvertising()->setScanResponseData(scanResponse)) {
+
+  BLEAdvertising *advertising = BLEDevice::getAdvertising();
+  // addData() silently drops anything past 31 bytes: only swap in a main
+  // advert that kept the service UUID AND the readings.
+  const bool mainOk = primary.getPayload().length() == 31 && advertising->setAdvertisementData(primary);
+  const bool rspOk = advertising->setScanResponseData(scanResponse);
+  if (mainOk && rspOk) {
     memcpy(lastBroadcast, adv, sizeof(adv));
     broadcastSet = true;
     lastBroadcastMs = millis();
