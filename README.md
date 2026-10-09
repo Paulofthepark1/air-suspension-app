@@ -108,6 +108,26 @@ the house repo `Paulofthepark1/homeassistant`, `esphome/truck-led-display.yaml`)
   | 11 | flags: bit0 air-down running, bit1 TOW adjustment running, bit2 firmware transfer, bit3 a client is connected |
   | 12, 13 | TOW target left, right |
 
+- **From fw 2.4.3 the essentials are in the main advertisement too.** A scan response
+  is a request/reply exchange, and a screen at the edge of range loses most of them:
+  from inside the house the dash screen heard the controller's name every few seconds
+  and its readings every few minutes. The main advert is now flags + the service UUID +
+  this 10-byte AD (31 bytes exactly), so every advert that arrives carries the numbers:
+
+  | Byte | Meaning |
+  |---|---|
+  | 0 | AD length (`9`) |
+  | 1 | `FF` manufacturer specific |
+  | 2–3 | `FF FF` company id |
+  | 4 | `'a'` short layout |
+  | 5, 6, 7 | left, right, tank PSI (`255` = no sensor) |
+  | 8 | packed: bit7 DAILY, bits4–6 DAILY status, bits0–3 flags (as above) |
+  | 9 | DAILY target PSI |
+
+  The device name moves to the scan response to make room. The app is unaffected: its
+  picker also matches the service UUID, which stays in the main advert, and a saved
+  device reconnects by its stored name.
+
 ## Event log (fw ≥ 2.2.0)
 
 `/events.csv` records reboots (with `esp_reset_reason` — poweron / crash /
