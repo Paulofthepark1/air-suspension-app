@@ -318,20 +318,31 @@ function onConnected() {
   sendTimeAndRequestSync();
 }
 
-let syncPhase = null; // 'hist' → 'ev' → null
+let syncPhase = null;   // 'hist' → 'ev' → null: a stream we are still waiting on
+let syncStream = null;  // which stream the device is actually sending. Kept
+                        // separate from syncPhase because the watchdog nulls
+                        // the phase while the device keeps streaming, and a
+                        // late END must still be filed as what it really is.
 let syncPhaseAt = 0;
+let syncBytes = 0;
 
 // A lost END must not wedge the phase machine forever. The timer is
 // inactivity-based: every received chunk refreshes syncPhaseAt, so only a
-// stream that has gone silent for 60s is declared stuck. (A fixed
+// stream that has gone truly silent is declared stuck. (A fixed
 // phase-duration timeout fired mid-transfer on the ~40-60s daily full
 // re-streams, wiping the buffer and silently cancelling the event sync —
-// seen in the field as the event log frozen for a week.)
+// seen in the field as the event log frozen for a week.) The history file
+// can now be 300 KB, which is minutes of BLE on a congested link, so give
+// a stalled stream longer than the old 60s before writing it off.
+const SYNC_SILENCE_MS = 120000;
 setInterval(() => {
-  if (syncPhase && Date.now() - syncPhaseAt > 60000) {
-    console.warn('Sync stream silent for 60s, resetting');
+  if (syncPhase && Date.now() - syncPhaseAt > SYNC_SILENCE_MS) {
+    console.warn('Sync stream silent, resetting', syncStream || syncPhase);
+    recordSyncAbort(syncStream || syncPhase, syncBytes);
     syncPhase = null;
+    syncStream = null;
     graphBuffer = "";
+    syncBytes = 0;
   }
 }, 20000);
 
@@ -369,7 +380,9 @@ async function sendTimeAndRequestSync() {
       try { lastFull = parseInt(localStorage.getItem('lastFullSync')) || 0; } catch(_) {}
       fullHistSyncInFlight = Date.now() - lastFull > 86400000;
       syncPhase = 'hist';
+      syncStream = 'hist';
       syncPhaseAt = Date.now();
+      syncBytes = 0;
       const cmd = (!fullHistSyncInFlight && supportsIncrementalSync() && since)
         ? "GET:" + Math.max(0, since - 600) : "GET";
       await graphCharacteristic.writeValue(encoder.encode(cmd));
@@ -380,14 +393,16 @@ async function sendTimeAndRequestSync() {
 }
 
 async function requestEventSync() {
-  if (!graphCharacteristic || !supportsEvents()) { syncPhase = null; return; }
+  if (!graphCharacteristic || !supportsEvents()) { syncPhase = null; syncStream = null; return; }
   let since = 0;
   try { since = parseInt(localStorage.getItem('lastEventEpoch')) || 0; } catch(_) {}
   let lastFull = 0;
   try { lastFull = parseInt(localStorage.getItem('lastFullEvSync')) || 0; } catch(_) {}
   fullEvSyncInFlight = Date.now() - lastFull > 86400000;
   syncPhase = 'ev';
+  syncStream = 'ev';
   syncPhaseAt = Date.now();
+  syncBytes = 0;
   try {
     const encoder = new TextEncoder('utf-8');
     const cmd = (!fullEvSyncInFlight && since) ? "GETEV:" + Math.max(0, since - 600) : "GETEV";
@@ -395,6 +410,7 @@ async function requestEventSync() {
   } catch(e) {
     console.error("Event sync failed", e);
     syncPhase = null;
+    syncStream = null;
   }
 }
 
@@ -445,6 +461,8 @@ function onDisconnected() {
   // streams (history rows were ending up parsed as events)
   graphBuffer = "";
   syncPhase = null;
+  syncStream = null;
+  syncBytes = 0;
   updateSetButtonsLayout();
   // Make targets modified again so user knows to hit SET
   appliedLeft = -1;
@@ -1093,10 +1111,18 @@ function handleGraphData(event) {
   let chunk = decoder.decode(event.target.value);
 
   if (chunk === "END") {
-    if (syncPhase === 'ev') {
+    // File the END by the stream we asked for, not by syncPhase. The
+    // watchdog nulls syncPhase on a stall, and the device streams on
+    // regardless: routing on syncPhase meant a late event END was parsed as
+    // history (always 0 rows) and, worse, one stalled history stream
+    // cancelled the event sync for the rest of the connection — the field
+    // symptom was an event log frozen for weeks while history kept working.
+    const stream = syncStream || syncPhase;
+    syncStream = null;
+    if (stream === 'ev') {
       console.log("Event sync complete");
       const n = parseAndSaveEvents(graphBuffer);
-      recordSyncCount('ev', n);
+      recordSyncCount('ev', n, syncBytes);
       if (fullEvSyncInFlight) {
         fullEvSyncInFlight = false;
         try { localStorage.setItem('lastFullEvSync', String(Date.now())); } catch(_) {}
@@ -1105,28 +1131,49 @@ function handleGraphData(event) {
     } else {
       console.log("Graph sync complete");
       const n = parseAndSaveGraphData(graphBuffer);
-      recordSyncCount('hist', n);
+      recordSyncCount('hist', n, syncBytes);
       if (fullHistSyncInFlight) {
         fullHistSyncInFlight = false;
         try { localStorage.setItem('lastFullSync', String(Date.now())); } catch(_) {}
       }
-      if (syncPhase === 'hist') requestEventSync();
-      else syncPhase = null;
+      // Always chain, even if the watchdog already gave up on this stream:
+      // the event backlog is the only place reboot reasons live.
+      requestEventSync();
     }
     graphBuffer = ""; // reset
+    syncBytes = 0;
   } else {
     graphBuffer += chunk;
+    syncBytes += chunk.length;
     syncPhaseAt = Date.now(); // stream is alive — keep the watchdog at bay
   }
 }
 
 // Rows received in the most recent sync of each kind — proves whether a
-// stream delivered data (diagnostics report shows it as SyncStats:)
-function recordSyncCount(kind, n) {
+// stream delivered data (diagnostics report shows it as SyncStats:). Bytes
+// go alongside the row count so "0 rows" can be told apart from "the device
+// sent nothing at all": 0 rows from 0 bytes is a device/command problem, 0 rows
+// from a full buffer is a parse problem.
+function recordSyncCount(kind, n, bytes) {
   try {
     const s = JSON.parse(localStorage.getItem('lastSyncCounts') || '{}');
     s[kind] = n;
     s[kind + 'At'] = Date.now();
+    s[kind + 'B'] = bytes;
+    delete s[kind + 'Abort'];
+    delete s[kind + 'AbortB'];
+    localStorage.setItem('lastSyncCounts', JSON.stringify(s));
+  } catch(_) {}
+}
+
+// A stream that goes silent never produces an END, so without this the next
+// report just shows a stale count with no hint that a sync died mid-flight.
+function recordSyncAbort(kind, bytes) {
+  if (!kind) return;
+  try {
+    const s = JSON.parse(localStorage.getItem('lastSyncCounts') || '{}');
+    s[kind + 'Abort'] = Date.now();
+    s[kind + 'AbortB'] = bytes;
     localStorage.setItem('lastSyncCounts', JSON.stringify(s));
   } catch(_) {}
 }
@@ -1930,7 +1977,10 @@ function buildDiagnosticsReport() {
   try {
     const s = JSON.parse(localStorage.getItem('lastSyncCounts') || '{}');
     const ago = (at) => at ? Math.round((Date.now() - at) / 60000) + 'min ago' : 'never';
-    lines.push(`SyncStats: histRows=${s.hist ?? '?'} (${ago(s.histAt)}) evRows=${s.ev ?? '?'} (${ago(s.evAt)})`);
+    lines.push(`SyncStats: histRows=${s.hist ?? '?'} (${ago(s.histAt)}, ${s.histB ?? '?'}B) evRows=${s.ev ?? '?'} (${ago(s.evAt)}, ${s.evB ?? '?'}B)`);
+    const aborts = ['hist', 'ev'].filter(k => s[k + 'Abort'])
+      .map(k => `${k} ${ago(s[k + 'Abort'])} after ${s[k + 'AbortB'] ?? '?'}B`);
+    if (aborts.length) lines.push(`SyncAborts: ${aborts.join(' | ')}`);
   } catch(_) {}
 
   const wk = Date.now() - 7 * 86400000;
